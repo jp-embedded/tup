@@ -23,6 +23,7 @@
 
 #include "db_types.h"
 #include <stdio.h>
+#include <time.h>
 
 struct tup_entry;
 struct timespan;
@@ -30,7 +31,7 @@ struct timespan;
 void progress_init(void);
 void tup_show_message(const char *s);
 void tup_main_progress(const char *s);
-void start_progress(int new_total, int new_total_time, int new_max_jobs);
+void start_progress(int new_total, time_t new_total_time, int new_max_jobs);
 void skip_result(struct tup_entry *tent);
 void show_result(struct tup_entry *tent, int is_error, struct timespan *ts, const char *extra_text, int always_display);
 void show_progress(int active, enum TUP_NODE_TYPE type);

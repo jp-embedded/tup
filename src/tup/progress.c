@@ -34,8 +34,8 @@ static int cur_phase = -1;
 static int sum;
 static int sum_width;
 static int total;
-static int job_time;
-static int total_time;
+static time_t job_time;
+static time_t total_time;
 static int max_jobs;
 static int is_active = 0;
 static int color_len;
@@ -47,7 +47,7 @@ static int display_job_time;
 static struct timespan gts;
 static struct timespan main_ts;
 
-static int get_time_remaining(char *dest, int len, int part, int whole, int approx);
+static int get_time_remaining(char *dest, int len, time_t part, time_t whole, int approx);
 
 /* Each of these corresponds to one unit of info that can be displayed inside
  * the progress bar (eg: ETA, Remaining, Active). Maxlen remains constant for
@@ -134,7 +134,7 @@ void tup_main_progress(const char *s)
 	tup_show_message(s);
 }
 
-void start_progress(int new_total, int new_total_time, int new_max_jobs)
+void start_progress(int new_total, time_t new_total_time, int new_max_jobs)
 {
 	int i;
 	char buf[256];
@@ -170,24 +170,31 @@ void start_progress(int new_total, int new_total_time, int new_max_jobs)
 void skip_result(struct tup_entry *tent)
 {
 	sum++;
-	if(tent) {
+	if(tent && total_time != -1 && tent->mtime.tv_sec != -1) {
 		total_time -= tent->mtime.tv_sec;
 	}
 }
 
 static int percent_complete(void)
 {
+	int percent;
+
 	if(!total)
 		return 0;
 	/* Use the job times if we have them available since it will report
 	 * a more accurate percentage complete than just the job count.
 	 */
 	if(total_time > 0) {
-		return (job_time*100)/total_time;
+		percent = (int)(((double)job_time * 100.0) / (double)total_time);
+	} else {
+		/* Default to job count if we can't use previous execution times. */
+		percent = (int)(((double)sum * 100.0) / (double)total);
 	}
-
-	/* Default to job count if we can't use previous execution times. */
-	return (sum*100)/total;
+	if(percent < 0)
+		return 0;
+	if(percent > 100)
+		return 100;
+	return percent;
 }
 
 void show_result(struct tup_entry *tent, int is_error, struct timespan *ts, const char *extra_text, int always_display)
@@ -195,7 +202,8 @@ void show_result(struct tup_entry *tent, int is_error, struct timespan *ts, cons
 	FILE *f;
 	float tdiff = 0.0;
 
-	job_time += tent->mtime.tv_sec;
+	if(tent->mtime.tv_sec != -1)
+		job_time += tent->mtime.tv_sec;
 
 	if(ts) {
 		tdiff = timespan_seconds(ts);
@@ -253,7 +261,7 @@ void show_result(struct tup_entry *tent, int is_error, struct timespan *ts, cons
 	color_error_mode_clear();
 }
 
-static int get_time_remaining(char *dest, int len, int part, int whole, int approx)
+static int get_time_remaining(char *dest, int len, time_t part, time_t whole, int approx)
 {
 	const char *eq = "=";
 
@@ -267,8 +275,8 @@ static int get_time_remaining(char *dest, int len, int part, int whole, int appr
 		timespan_end(&gts);
 		ms = timespan_milliseconds(&gts);
 
-		/* This can easily overflow, so do the computation in float */
-		total_runtime = (time_t)((float)ms * (float)whole / (float)part);
+		/* This can easily overflow, so do the computation in double. */
+		total_runtime = (time_t)((double)ms * (double)whole / (double)part);
 		time_left = total_runtime - ms;
 
 		/* Try to find the best units. Note that we use +1 because the
@@ -322,6 +330,10 @@ void show_progress(int active, enum TUP_NODE_TYPE type)
 		} else {
 			fill = max * percent_complete() / 100;
 		}
+		if(fill < 0)
+			fill = 0;
+		if(fill > max)
+			fill = max;
 
 		if(color_len) {
 			memset(buf, ' ', sizeof(buf));
