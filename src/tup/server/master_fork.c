@@ -677,6 +677,7 @@ static int master_fork_loop(void)
 		}
 #endif
 
+		pthread_mutex_lock(&child_waiter_root.lock);
 		pid = fork();
 		if(pid < 0) {
 			perror("fork");
@@ -735,10 +736,11 @@ static int master_fork_loop(void)
 		waiter->pid = pid;
 		waiter->sid = em.sid;
 		waiter->tnode.id = pid;
-		if(thread_tree_insert(&child_waiter_root, &waiter->tnode) < 0) {
+		if(thread_tree_insert_locked(&child_waiter_root, &waiter->tnode) < 0) {
 			fprintf(stderr, "tup internal error: unable to insert pid %i into the thread tree.\n", pid);
 			exit(1);
 		}
+		pthread_mutex_unlock(&child_waiter_root.lock);
 	}
 
 	{

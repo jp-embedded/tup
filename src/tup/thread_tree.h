@@ -45,6 +45,7 @@ struct thread_root {
 
 struct thread_tree *thread_tree_search(struct thread_root *troot, int id);
 int thread_tree_insert(struct thread_root *troot, struct thread_tree *data);
+int thread_tree_insert_locked(struct thread_root *troot, struct thread_tree *data);
 void thread_tree_rm(struct thread_root *troot, struct thread_tree *data);
 
 #endif
