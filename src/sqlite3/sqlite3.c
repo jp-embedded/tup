@@ -41643,6 +41643,12 @@ static int nolockClose(sqlite3_file *id) {
 */
 #define DOTLOCK_SUFFIX ".lock"
 
+#ifdef USE_DOTLOCK
+#include "../tup/tup_lock_t.h"
+extern int tup_try_flock(tup_lock_t fd);
+extern int tup_unflock(tup_lock_t fd);
+#endif
+
 /*
 ** This routine checks if there is a RESERVED lock held on the specified
 ** file by this or any other process. If the caller holds a SHARED
@@ -41657,7 +41663,13 @@ static int dotlockCheckReservedLock(sqlite3_file *id, int *pResOut) {
   if( pFile->eFileLock>=SHARED_LOCK ){
     *pResOut = 0;
   }else{
+#ifdef USE_DOTLOCK
+	int rc = tup_try_flock(pFile->h);
+	if (rc == 0) tup_unflock(pFile->h);
+    *pResOut = rc == 0;
+#else
     *pResOut = osAccess((const char*)pFile->lockingContext, 0)==0;
+#endif
   }
   OSTRACE(("TEST WR-LOCK %d %d %d (dotlock)\n", pFile->h, 0, *pResOut));
   return SQLITE_OK;
@@ -41690,6 +41702,7 @@ static int dotlockCheckReservedLock(sqlite3_file *id, int *pResOut) {
 ** With dotfile locking, we really only support state (4): EXCLUSIVE.
 ** But we track the other locking levels internally.
 */
+
 static int dotlockLock(sqlite3_file *id, int eFileLock) {
   unixFile *pFile = (unixFile*)id;
   char *zLockFile = (char *)pFile->lockingContext;
@@ -41711,7 +41724,11 @@ static int dotlockLock(sqlite3_file *id, int eFileLock) {
   }
 
   /* grab an exclusive lock */
+#ifdef USE_DOTLOCK
+  rc = tup_try_flock(pFile->h);
+#else 
   rc = osMkdir(zLockFile, 0777);
+#endif
   if( rc<0 ){
     /* failed to open/create the lock directory */
     int tErrno = errno;
@@ -41765,7 +41782,11 @@ static int dotlockUnlock(sqlite3_file *id, int eFileLock) {
 
   /* To fully unlock the database, delete the lock file */
   assert( eFileLock==NO_LOCK );
+#ifdef USE_DOTLOCK
+  rc = tup_unflock(pFile->h);
+#else
   rc = osRmdir(zLockFile);
+#endif
   if( rc<0 ){
     int tErrno = errno;
     if( tErrno==ENOENT ){
