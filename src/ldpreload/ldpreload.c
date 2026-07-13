@@ -44,6 +44,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 int __xstat(int vers, const char *name, struct stat *buf);
 int stat(const char *filename, struct stat *buf);
@@ -663,7 +664,6 @@ static void handle_file_locked(const char *dirname, int dirlen, const char *file
 		 */
 		return;
 	}
-
 	if(tup_flock(depfd) < 0) {
 		fprintf(stderr, "tup error: Unable to lock dependency file for writing [%i]: (file event = %s)\n", depfd, file);
 		goto out_error;
@@ -747,6 +747,16 @@ static int ignore_file(const char *file)
 		return 1;
 	if(strncmp(file, "/proc/", 6) == 0)
 		return 1;
+
+	// todo: added these to prevent tup getting confused. Should be
+	// ignored by not using fulldeps?
+	if(strncmp(file, "/usr/", 5) == 0)
+		return 1;
+	if(strncmp(file, "/tmp/", 5) == 0)
+		return 1;
+	if(strncmp(file, "/bin/", 5) == 0)
+		return 1;
+
 	if(is_ccache_path(file))
 		return 1;
 	return 0;
