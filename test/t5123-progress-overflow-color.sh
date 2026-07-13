@@ -17,13 +17,13 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 # Make sure large stored job times cannot overflow the progress percentage and
-# make the progress bar exceed display.width.
+# make the colored progress bar exceed display.width.
 . ./tup.sh
 check_no_windows sqlite3 executable
 
 cat > .tup/options << HERE
 [display]
-color = never
+color = always
 progress = 1
 width = 20
 
@@ -54,7 +54,8 @@ update node set mtime = 1 where name in ('touch out2', 'touch out3', 'touch out4
 HERE
 
 tup upd > .tup/progress-output 2>&1
-tr '\r' '\n' < .tup/progress-output | grep '^ \[' > .tup/progress-lines
+esc=`printf '\033'`
+tr '\r' '\n' < .tup/progress-output | sed "s/${esc}\[[0-9;]*m//g" | grep -a '^ \[' > .tup/progress-lines
 
 if [ ! -s .tup/progress-lines ]; then
 	echo "*** Expected progress output" 1>&2
@@ -64,7 +65,7 @@ fi
 
 while IFS= read -r line; do
 	len=`printf "%s" "$line" | wc -c | sed 's/ //g'`
-	if printf "%s\n" "$line" | grep -- '-[0-9][0-9]*%' > /dev/null; then
+	if printf "%s\n" "$line" | grep -a -- '-[0-9][0-9]*%' > /dev/null; then
 		echo "*** Progress percent went negative" 1>&2
 		printf "%s\n" "$line" 1>&2
 		exit 1
