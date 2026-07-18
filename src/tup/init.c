@@ -153,6 +153,10 @@ static int mkdirtree(const char *dirname)
 	}
 
 	p = dirpart;
+	/* Skip leading slashes (t0006) */
+	while(is_path_sep(p)) {
+		p++;
+	}
 	while(1) {
 		char *slash = p;
 		char slash_found = 0;
