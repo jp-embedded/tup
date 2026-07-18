@@ -1,4 +1,4 @@
-.TH "tup" "1" "2024/05/19" "http://gittup.org/tup" "tup manual"
+.TH "tup" "1" "2026/07/17" "http://gittup.org/tup" "tup manual"
 .\" disable hyphenation/justification
 .nh
 .ad l
@@ -14,7 +14,7 @@ tup [--debug-sql] [--debug-fuse] [SECONDARY_COMMAND] [ARGS]
 .SH "DESCRIPTION"
 Tup is a file-based build system. You should use tup if you are developing software which needs to be translated from input files (written by you) into a different output format. For example, if you are writing a C program, you could use tup to determine which files need to be recompiled, archived, and linked based on a dependency graph.
 .P
-Tup has no domain specific knowledge. You must tell tup how to build your program, such as by saying that all .c files are converted to .o files by using gcc. This is done by writing one or more Tupfiles.
+Tup has no domain-specific knowledge. You must tell tup how to build your program, such as by saying that all .c files are converted to .o files by using gcc. This is done by writing one or more Tupfiles.
 .SH "PRIMARY COMMAND: tup"
 You can do all of your development with just 'tup', along with writing Tupfiles. See also the \fBINI FILE\fR, \fBOPTIONS FILES\fR and \fBTUPFILES\fR sections below.
 .TP
@@ -64,7 +64,7 @@ tup [--debug-sql] [--debug-fuse] SECONDARY_COMMAND [SECONDARY_COMMAND_ARGS]
 .B init [directory]
 Creates a '.tup' directory in the specified directory and initializes the tup database. If a directory name is unspecified, it defaults to creating '.tup' in the current directory. This defines the top of your project, as viewed by tup. Everything in the current directory and its subdirectories are known as the "tup hierarchy".
 
-If you want to avoid having to run 'tup init' every time you clone your repository to a new location, you can instead create an empty file called 'Tupfile.ini' in the project root. If 'tup' is run without the '.tup' directory present, it will automatically create one for you as a sibling of the Tupfile.ini file, as if you had run 'tup init' in that directory.. If there are multiple Tupfile.ini files in parent paths, the one highest up the tree will be chosen.
+If you want to avoid having to run 'tup init' every time you clone your repository to a new location, you can instead create an empty file called 'Tupfile.ini' in the project root. If 'tup' is run without the '.tup' directory present, it will automatically create one for you as a sibling of the Tupfile.ini file, as if you had run 'tup init' in that directory. If there are multiple Tupfile.ini files in parent paths, the one highest up the tree will be chosen.
 .RS
 .TP
 .B --no-sync
@@ -217,7 +217,7 @@ After the script name, individual output files can be listed in order to limit t
 .RE
 .TP
 .B compiledb
-The compiledb command creates a compile_commands.json file for use with third-party tools that use that file as a reference to determine how files are compiled. The file is created at the top of the tup hierarchy, or if you are using variants, each variant gets has its own compile_commands.json created at the root of the variant. You must annotate files that you want to export with the ^j flag. For example, you could add the ^j flag to your compiler invocations:
+The compiledb command creates a compile_commands.json file for use with third-party tools that use that file as a reference to determine how files are compiled. The file is created at the top of the tup hierarchy, or if you are using variants, each variant gets its own compile_commands.json created at the root of the variant. You must annotate files that you want to export with the ^j flag. For example, you could add the ^j flag to your compiler invocations:
 
 .nf
 
@@ -262,7 +262,7 @@ You shouldn't ever need to run this, unless you want to make the database reflec
 .B upd
 Legacy secondary command. Calling 'tup upd' is equivalent to simply calling 'tup'.
 .SH INI FILE
-The tup command can be run from anywhere in the source tree. It uses the information from all Tupfiles (see the \fBTUPFILES\fR section) as well as it's own dynamic database, which is maintained in the .tup directory located at the root of the project. The .tup directory can be created manually with the 'tup init' command, or you can have it run automatically by adding an empty Tupfile.ini file at the root of the project's version control repository.
+The tup command can be run from anywhere in the source tree. It uses the information from all Tupfiles (see the \fBTUPFILES\fR section) as well as its own dynamic database, which is maintained in the .tup directory located at the root of the project. The .tup directory can be created manually with the 'tup init' command, or you can have it run automatically by adding an empty Tupfile.ini file at the root of the project's version control repository.
 
 The contents of the Tupfile.ini file are ignored.
 
@@ -592,13 +592,13 @@ will generate the command "cc -Dfoo  -o bar.o -c bar.c" when run.
 .P
 Any $-variable that begins with the string "CONFIG_" is automatically converted to the @-variable of the same name minus the "CONFIG_" prefix. In other words, $(CONFIG_FOO) and @(FOO) are interchangeable. Attempting to assign a value to a CONFIG_ variable in a Tupfile results in an error, since these can only be set in the tup.config file.
 .P
-Note that you may see a syntax using back-ticks when setting variables, such as:
+Note that you may see a syntax using backticks when setting variables, such as:
 .nf
 
 CFLAGS += `pkg-config fuse3 --cflags`
 
 .fi
-Tup does not do any special processing for back-ticks, so the pkg-config command is not actually executed when the variable is set in this example. Instead, this is passed verbatim to any place that uses it. Therefore if a command later references $(CFLAGS), it will contain the string `pkg-config fuse3 --cflags`, so it will be parsed by the shell.
+Tup does not do any special processing for backticks, so the pkg-config command is not actually executed when the variable is set in this example. Instead, this is passed verbatim to any place that uses it. Therefore if a command later references $(CFLAGS), it will contain the string `pkg-config fuse3 --cflags`, so it will be parsed by the shell.
 .TP
 .B var += value
 Append "value" to the end of the current value of "var". If "var" has not been set, this is equivalent to a regular '=' statement. If "var" already has a value, a space is appended to the $-variable before the new value is appended.
@@ -723,7 +723,7 @@ You will only want to specify the output parameter in either the !-macro or the 
 Reads the specified file and continues parsing almost as if that file was pasted inline in the current Tupfile. Only regular files are allowed to be included -- attempting to include a generated file is an error. Any include statements that occur in the included file will be parsed relative to the included file's directory.
 .TP
 .B include_rules
-Reads in Tuprules.tup files up the directory chain. The first Tuprules.tup file is read at the top of the tup hierarchy, followed by the next subdirectory, and so on through to the Tuprules.tup file in the current directory. In this way, the top-level Tuprules.tup file can specify general variable settings, and subsequent subdirectories can override them with more specific settings. You would generally specify include_rules as the first line in the Tupfile. The name is a bit of a misnomer, since you would typically use Tuprules.tup to define variables rather than :-rules.
+Reads in all Tuprules.tup files up the directory chain. The first Tuprules.tup file is read at the top of the tup hierarchy, followed by the next subdirectory, and so on through to the Tuprules.tup file in the current directory. In this way, the top-level Tuprules.tup file can specify general variable settings, and subsequent subdirectories can override them with more specific settings. You would generally specify include_rules as the first line in the Tupfile. The name is a bit of a misnomer, since you would typically use Tuprules.tup to define variables rather than :-rules.
 .TP
 .B run ./script args
 Runs an external script with the given arguments to generate :-rules. This is an advanced feature that can be used when the standard Tupfile syntax is too simplistic for a complex program. The script is expected to write the :-rules to stdout. No other Tupfile commands are allowed - for example, the script cannot create $-variables or !-macros, but it can output :-rules that use those features. As a simple example, consider if a command must be executed 5 times, but there are no input files to use tup's foreach keyword. An external script called 'build.sh' could be written as follows:
@@ -756,7 +756,7 @@ Since the Tupfile-parsing stage is watched for dependencies, any files that this
 
 .TP
 .B preload directory
-By default, a run-script can only use a readdir() (ie: use a wild-card) on the current directory. To specify a list of other allowable wild-card directories, use the preload keyword. For example, if a run script needs to look at *.c and src/*.c, the src directory needs to be preloaded:
+By default, a run-script can only use a readdir() (ie: use a wildcard) on the current directory. To specify a list of other allowable wildcard directories, use the preload keyword. For example, if a run script needs to look at *.c and src/*.c, the src directory needs to be preloaded:
 
 .nf
 
@@ -812,7 +812,7 @@ Unlike 'export', the import command does not pass the variables to the sub-proce
 
 .TP
 .B .gitignore
-Tells tup to automatically generate a .gitignore file in the current directory which contains a list of the output files that are generated by tup. This can be useful if you are using git, since the set of files generated by tup matches exactly the set of files that you want git to ignore. If you are using Tuprules.tup files, you may just want to specify .gitignore in the top-level Tuprules.tup, and then have every other Tupfile use include_rules to pick up the .gitignore definition. In this way you never have to maintain the .gitignore files manually. Note that you may wish to ignore other files not created by tup, such as temporary files created by your editor. In this case case you will want to setup a global gitignore file using a command like 'git config --global core.excludesfile ~/.gitignore', and then setup ~/.gitignore with your personal list. For other cases, you can also simply add any custom ignore rules above the "##### TUP GITIGNORE #####" line.
+Tells tup to automatically generate a .gitignore file in the current directory which contains a list of the output files that are generated by tup. This can be useful if you are using git, since the set of files generated by tup matches exactly the set of files that you want git to ignore. If you are using Tuprules.tup files, you may just want to specify .gitignore in the top-level Tuprules.tup, and then have every other Tupfile use include_rules to pick up the .gitignore definition. In this way you never have to maintain the .gitignore files manually. Note that you may wish to ignore other files not created by tup, such as temporary files created by your editor. In this case you will want to set up a global gitignore file using a command like 'git config --global core.excludesfile ~/.gitignore', and then setup ~/.gitignore with your personal list. For other cases, you can also simply add any custom ignore rules above the "##### TUP GITIGNORE #####" line.
 .TP
 .B #
 At the beginning of a line, a '#' character signifies a comment. A comment line is ignored by the parser. The comment can have leading whitespaces that is also ignored. If there is any non-whitespace before a '#' character, then the line is not a comment. It also means that if a previous line ended with '\\' (line wrap) then '#' is interpreted as a regular symbol.
@@ -924,11 +924,11 @@ CFLAGS_foo.c = -DFOO
 : *.o |> gcc %f -o %o |> program
 
 .fi
-Tup begins parsing this Tupfile with an empty $-variable set. The first "WARNINGS += -W" line will set the WARNINGS variable to "-W". The second line will append, so WARNINGS will be set to "-W -Wall". The third line references this value, so CFLAGS will now equal "-W -Wall -O2". The fourth line sets a new variable, called CFLAGS_foo.c, and set it to -DFOO". The first rule will create a new node "foo.h" in the database, along with the corresponding command to create it. Note this file won't exist in the filesystem until the command is actually executed after all Tupfiles are parsed.
+Tup begins parsing this Tupfile with an empty $-variable set. The first "WARNINGS += -W" line will set the WARNINGS variable to "-W". The second line will append, so WARNINGS will be set to "-W -Wall". The third line references this value, so CFLAGS will now equal "-W -Wall -O2". The fourth line sets a new variable, called CFLAGS_foo.c, and set it to "-DFOO". The first rule will create a new node "foo.h" in the database, along with the corresponding command to create it. Note this file won't exist in the filesystem until the command is actually executed after all Tupfiles are parsed.
 .P
 The foreach :-rule will generate a command to compile each file. First tup will parse the input section, and use the glob operation on the database since a '*' is present. This glob matches foo.c and bar.c. Since it is a foreach rule, tup will run through the rule first using the input "foo.c", and again using the input "bar.c". The output pattern is parsed on each pass, followed by the command string.
 .P
-On the foo.c pass, the output pattern "%B.o" is parsed, which will equal "foo.o". Now the command string is parsed, replacing "foo.c" for "%f" and "foo.o" for "%o". The $-variables are then expanded, so $(CFLAGS) becomes "-W -Wall -O2", and $(CFLAGS_foo.c)" becomes "-DFOO". The final command string written to the database is "gcc -c foo.c -o foo.o -W -Wall -O2 -DFOO". An output link is written to the foo.o file, and input links are written from foo.c and foo.h (the order-only input).
+On the foo.c pass, the output pattern "%B.o" is parsed, which will equal "foo.o". Now the command string is parsed, replacing "foo.c" for "%f" and "foo.o" for "%o". The $-variables are then expanded, so $(CFLAGS) becomes "-W -Wall -O2", and "$(CFLAGS_foo.c)" becomes "-DFOO". The final command string written to the database is "gcc -c foo.c -o foo.o -W -Wall -O2 -DFOO". An output link is written to the foo.o file, and input links are written from foo.c and foo.h (the order-only input).
 .P
 On the second pass through the foreach rule, the only difference is "bar.c" is the input. Therefore the output pattern becomes "bar.o", and the final command string becomes "gcc -c bar.c -o bar.o -W -Wall -O2 " since $(CFLAGS_bar.c) was unspecified.
 .P
