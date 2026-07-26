@@ -2361,16 +2361,21 @@ struct path_list *new_pl(struct tupfile *tf, const char *s, int len, struct bin_
 	return pl;
 }
 
-static int next_path(struct tupfile *tf, const char *p, char *dest)
+static int next_path(struct tupfile *tf, const char *p, char *dest, size_t dest_size)
 {
 	int espace = 0;
 	int quoted = 0;
 	const char *s = p;
+	size_t i = 0;
 
 	for(; *s; s++) {
+		if(i >= dest_size) {
+			fprintf(tf->f, "tup error: Path too long (exceeds %zu characters)\n", dest_size);
+			return -1;
+		}
 		if(espace) {
-			*dest = *s;
-			dest++;
+			dest[i] = *s;
+			i++;
 			espace = 0;
 			continue;
 		} else if(*s == '\\') {
@@ -2380,18 +2385,18 @@ static int next_path(struct tupfile *tf, const char *p, char *dest)
 			quoted = !quoted;
 			continue;
 		} else if(isspace(*s) && !quoted) {
-			*dest = 0;
+			dest[i] = 0;
 			return s - p;
 		} else {
-			*dest = *s;
-			dest++;
+			dest[i] = *s;
+			i++;
 		}
 	}
 	if(quoted) {
 		fprintf(tf->f, "tup error: Missing endquote on string: %s\n", p);
 		return -1;
 	}
-	*dest = 0;
+	dest[i] = 0;
 	return s - p;
 }
 
@@ -2404,7 +2409,7 @@ static int get_path_list(struct tupfile *tf, const char *p, struct path_list_hea
 	while(*s) {
 		char dest[PATH_MAX];
 		int x;
-		x = next_path(tf, s, dest);
+		x = next_path(tf, s, dest, sizeof(dest));
 		if(x < 0)
 			return -1;
 
