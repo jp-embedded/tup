@@ -134,6 +134,7 @@ static int watch_path_internal(tupid_t dt, const char *file,
 		if(chdir("..") < 0) {
 			perror("..");
 			fprintf(stderr, "tup error: Unable to chdir() back to parent directory in watch_path()\n");
+			return -1;
 		}
 
 		{
