@@ -687,6 +687,7 @@ int get_outside_tup_mtime(struct tup_entry *parent, struct path_element *pel, st
 			if(errno != ENOENT && errno != ENOTDIR) {
 				perror("fstatat");
 				fprintf(stderr, "tup error: Unable to stat file: %.*s\n", pel->len, pel->path);
+				close(dfd);
 				return -1;
 			}
 			*mtime = INVALID_MTIME;
