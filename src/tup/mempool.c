@@ -24,6 +24,8 @@
 #include <stdint.h>
 #include <pthread.h>
 
+#define MAX_ALLOC_SIZE (1 << 20)
+
 static struct mementry_head head = SLIST_HEAD_INITIALIZER(head);
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -76,7 +78,8 @@ void *mempool_alloc(struct mempool *pool)
 		mem_offset = ((sizeof(*block) + (pool->alignment - 1)) / pool->alignment) * pool->alignment;
 		pool->mem = (char*)block + mem_offset;
 		pool->free_count = (pool->next_alloc_size - mem_offset) / pool->item_size;
-		pool->next_alloc_size *= 2;
+		if(pool->next_alloc_size < MAX_ALLOC_SIZE)
+			pool->next_alloc_size *= 2;
 	}
 
 	/* Since we didn't have any items available from the free_list, use the
