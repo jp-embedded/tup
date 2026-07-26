@@ -22,6 +22,7 @@
 #define tup_mempool
 
 #include "bsd/queue.h"
+#include <pthread.h>
 
 struct mementry {
 	SLIST_ENTRY(mementry) list;
@@ -34,6 +35,7 @@ struct mempool {
 	unsigned int next_alloc_size;
 	unsigned int alignment;
 	int free_count;
+	pthread_mutex_t lock;
 	char *mem;
 };
 TAILQ_HEAD(mempool_head, mempool);

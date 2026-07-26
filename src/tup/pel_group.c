@@ -27,7 +27,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static _Thread_local struct mempool pool = MEMPOOL_INITIALIZER(struct path_element);
+static struct mempool pool = MEMPOOL_INITIALIZER(struct path_element);
 
 int pel_ignored(const char *path, int len)
 {

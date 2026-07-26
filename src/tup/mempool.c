@@ -32,10 +32,12 @@ void *mempool_alloc(struct mempool *pool)
 	struct mementry *ret;
 	struct mementry *block;
 
+	pthread_mutex_lock(&pool->lock);
 	/* If an entry is available on the free list, grab that first */
 	ret = SLIST_FIRST(&pool->free_list);
 	if(ret) {
 		SLIST_REMOVE_HEAD(&pool->free_list, list);
+		pthread_mutex_unlock(&pool->lock);
 		return ret;
 	}
 
@@ -49,12 +51,14 @@ void *mempool_alloc(struct mempool *pool)
 		 */
 		if(pool->item_size < sizeof(struct mementry)) {
 			fprintf(stderr, "tup internal error: mempool item size too small: %i\n", pool->item_size);
+			pthread_mutex_unlock(&pool->lock);
 			return NULL;
 		}
 
 		block = malloc(pool->next_alloc_size);
 		if(!block) {
 			perror("malloc");
+			pthread_mutex_unlock(&pool->lock);
 			return NULL;
 		}
 		pthread_mutex_lock(&lock);
@@ -80,11 +84,13 @@ void *mempool_alloc(struct mempool *pool)
 	 */
 	if(((uintptr_t)pool->mem & (pool->alignment-1)) != 0) {
 		fprintf(stderr, "tup internal error: memory address in mempool (%p) not aligned to %u bytes.\n", pool->mem, pool->alignment);
+		pthread_mutex_unlock(&pool->lock);
 		return NULL;
 	}
 	ret = (void*)pool->mem;
 	pool->mem += pool->item_size;
 	pool->free_count--;
+	pthread_mutex_unlock(&pool->lock);
 	return ret;
 }
 
@@ -92,7 +98,9 @@ void mempool_free(struct mempool *pool, void *item)
 {
 	if(item) {
 		struct mementry *entry = item;
+		pthread_mutex_lock(&pool->lock);
 		SLIST_INSERT_HEAD(&pool->free_list, entry, list);
+		pthread_mutex_unlock(&pool->lock);
 	}
 }
 

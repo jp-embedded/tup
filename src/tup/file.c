@@ -46,7 +46,7 @@ static int add_parser_files_locked(struct file_info *finfo,
 				   struct tent_entries *root, tupid_t vardt,
 				   int full_deps);
 
-static _Thread_local struct mempool pool = MEMPOOL_INITIALIZER(struct file_entry);
+static struct mempool pool = MEMPOOL_INITIALIZER(struct file_entry);
 
 int init_file_info(struct file_info *info, int do_unlink)
 {

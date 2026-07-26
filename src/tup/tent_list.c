@@ -23,7 +23,7 @@
 #include "entry.h"
 #include <stdio.h>
 
-static _Thread_local struct mempool pool = MEMPOOL_INITIALIZER(struct tent_list);
+static struct mempool pool = MEMPOOL_INITIALIZER(struct tent_list);
 
 int tent_list_add_head(struct tent_list_head *head, struct tup_entry *tent)
 {

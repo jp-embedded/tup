@@ -22,7 +22,7 @@
 #include "mempool.h"
 #include "entry.h"
 
-static _Thread_local struct mempool pool = MEMPOOL_INITIALIZER(struct tent_tree);
+static struct mempool pool = MEMPOOL_INITIALIZER(struct tent_tree);
 
 static int tent_tree_cmp(struct tent_tree *tt1, struct tent_tree *tt2)
 {

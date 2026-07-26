@@ -41,7 +41,7 @@
 static struct tupid_entries tup_root = RB_INITIALIZER(&tup_root);
 static int do_verbose = 0;
 static pthread_mutex_t entry_openat_mutex = PTHREAD_MUTEX_INITIALIZER;
-static _Thread_local struct mempool pool = MEMPOOL_INITIALIZER(struct tup_entry);
+static struct mempool pool = MEMPOOL_INITIALIZER(struct tup_entry);
 
 static struct tup_entry *new_entry(tupid_t tupid, tupid_t dt,
 				   const char *name, int len,

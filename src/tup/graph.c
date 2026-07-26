@@ -35,8 +35,8 @@
 
 static struct graph group_graph;
 static int group_graph_inited = 0;
-static _Thread_local struct mempool node_pool = MEMPOOL_INITIALIZER(struct node);
-static _Thread_local struct mempool edge_pool = MEMPOOL_INITIALIZER(struct edge);
+static struct mempool node_pool = MEMPOOL_INITIALIZER(struct node);
+static struct mempool edge_pool = MEMPOOL_INITIALIZER(struct edge);
 
 static struct tup_entry root_entry;
 static char root_name[] = "root";

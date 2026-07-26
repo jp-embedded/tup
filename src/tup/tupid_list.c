@@ -22,7 +22,7 @@
 #include "mempool.h"
 #include <stdio.h>
 
-static _Thread_local struct mempool pool = MEMPOOL_INITIALIZER(struct tupid_list);
+static struct mempool pool = MEMPOOL_INITIALIZER(struct tupid_list);
 
 int tupid_list_add_tail(struct tupid_list_head *head, tupid_t tupid)
 {
