@@ -3038,8 +3038,6 @@ static int glob_parse(const char *pattern, int patlen, char *match, int *globidx
 
 			/* Skip any subsequent *. They don't mean anything. */
 			while (p_it < patlen && pattern[p_it] == '*') {
-				glob_cnt++;
-				globidx[glob_cnt*2] = m_it;
 				p_it++;
 			}
 
