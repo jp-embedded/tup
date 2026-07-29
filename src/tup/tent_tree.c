@@ -19,10 +19,8 @@
  */
 
 #include "tent_tree.h"
-#include "mempool.h"
+#include "jp_alloc/jp_alloc.h"
 #include "entry.h"
-
-static struct mempool pool = MEMPOOL_INITIALIZER(struct tent_tree);
 
 static int tent_tree_cmp(struct tent_tree *tt1, struct tent_tree *tt2)
 {
@@ -41,7 +39,7 @@ int tent_tree_add(struct tent_entries *root, struct tup_entry *tent)
 {
 	struct tent_tree *tt;
 
-	tt = mempool_alloc(&pool);
+	tt = jp_alloc_sized(sizeof *tt);
 	if(!tt) {
 		return -1;
 	}
@@ -50,7 +48,7 @@ int tent_tree_add(struct tent_entries *root, struct tup_entry *tent)
 		fprintf(stderr, "tup error: Unable to insert duplicate tup_entry: ");
 		print_tup_entry(stderr, tent);
 		fprintf(stderr, "\n");
-		mempool_free(&pool, tt);
+		jp_free_sized(tt, sizeof *tt);
 		return -1;
 	}
 	tup_entry_add_ref(tent);
@@ -62,13 +60,13 @@ int tent_tree_add_dup(struct tent_entries *root, struct tup_entry *tent)
 {
 	struct tent_tree *tt;
 
-	tt = mempool_alloc(&pool);
+	tt = jp_alloc_sized(sizeof *tt);
 	if(!tt) {
 		return -1;
 	}
 	tt->tent = tent;
 	if(RB_INSERT(tent_entries, root, tt) != NULL) {
-		mempool_free(&pool, tt);
+		jp_free_sized(tt, sizeof *tt);
 	} else {
 		tup_entry_add_ref(tent);
 		root->count++;
@@ -119,7 +117,7 @@ void tent_tree_rm(struct tent_entries *root, struct tent_tree *tt)
 {
 	RB_REMOVE(tent_entries, root, tt);
 	tup_entry_del_ref(tt->tent);
-	mempool_free(&pool, tt);
+	jp_free_sized(tt, sizeof *tt);
 }
 
 void free_tent_tree(struct tent_entries *root)

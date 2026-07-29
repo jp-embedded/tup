@@ -1,1 +1,3 @@
 CFLAGS += -include compat/netbsd.h
+
+LDFLAGS += -lstdc++

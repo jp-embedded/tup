@@ -23,11 +23,9 @@
 #include "config.h"
 #include "entry.h"
 #include "compat.h"
-#include "mempool.h"
+#include "jp_alloc/jp_alloc.h"
 #include <stdio.h>
 #include <string.h>
-
-static struct mempool pool = MEMPOOL_INITIALIZER(struct path_element);
 
 int pel_ignored(const char *path, int len)
 {
@@ -57,7 +55,7 @@ static int add_pel(const char *path, int len, struct pel_group *pg)
 {
 	struct path_element *pel;
 
-	pel = mempool_alloc(&pool);
+	pel = jp_alloc_sized(sizeof *pel);
 	if(!pel) {
 		return -1;
 	}
@@ -191,7 +189,7 @@ int get_path_elements(const char *path, struct pel_group *pg)
 
 void free_pel(struct path_element *pel)
 {
-	mempool_free(&pool, pel);
+	jp_free_sized(pel, sizeof *pel);
 }
 
 void del_pel(struct path_element *pel, struct pel_group *pg)

@@ -19,7 +19,7 @@
  */
 
 #include "graph.h"
-#include "mempool.h"
+#include "jp_alloc/jp_alloc.h"
 #include "entry.h"
 #include "debug.h"
 #include "fileio.h"
@@ -35,8 +35,6 @@
 
 static struct graph group_graph;
 static int group_graph_inited = 0;
-static struct mempool node_pool = MEMPOOL_INITIALIZER(struct node);
-static struct mempool edge_pool = MEMPOOL_INITIALIZER(struct edge);
 
 static struct tup_entry root_entry;
 static char root_name[] = "root";
@@ -54,7 +52,7 @@ struct node *create_node(struct graph *g, struct tup_entry *tent)
 {
 	struct node *n;
 
-	n = mempool_alloc(&node_pool);
+	n = jp_alloc_sized(sizeof *n);
 	if(!n) {
 		return NULL;
 	}
@@ -146,14 +144,14 @@ void remove_node(struct graph *g, struct node *n)
 		DEBUGP("Warning: Node %lli still has incoming edges.\n", n->tnode.tupid);
 	}
 	tupid_tree_rm(&g->node_root, &n->tnode);
-	mempool_free(&node_pool, n);
+	jp_free_sized(n, sizeof *n);
 }
 
 int create_edge(struct node *n1, struct node *n2, int style)
 {
 	struct edge *e;
 
-	e = mempool_alloc(&edge_pool);
+	e = jp_alloc_sized(sizeof *e);
 	if(!e) {
 		return -1;
 	}
@@ -174,7 +172,7 @@ static int create_edge_sorted(struct node *n1, struct node *n2, int style)
 	struct edge *e2;
 	struct edge *last;
 
-	e = mempool_alloc(&edge_pool);
+	e = jp_alloc_sized(sizeof *e);
 	if(!e) {
 		return -1;
 	}
@@ -216,7 +214,7 @@ void remove_edge(struct edge *e)
 {
 	LIST_REMOVE(e, list);
 	LIST_REMOVE(e, destlist);
-	mempool_free(&edge_pool, e);
+	jp_free_sized(e, sizeof *e);
 }
 
 int create_graph(struct graph *g, enum TUP_NODE_TYPE count_flags)

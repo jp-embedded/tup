@@ -7,3 +7,5 @@ endif
 ifeq (@(TUP_ARCH),x86_64)
   X86_ARCH_SIBLINGS=y
 endif
+
+LDFLAGS += -lstdc++

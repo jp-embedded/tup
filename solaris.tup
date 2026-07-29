@@ -2,3 +2,4 @@
 # not-so-informative fashion.
 CFLAGS += -D_REENTRANT
 LDFLAGS += -lsocket
+LDFLAGS += -lstdc++

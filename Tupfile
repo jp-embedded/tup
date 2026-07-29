@@ -21,6 +21,9 @@ srcs += src/tup/tup/*.o
 srcs += src/tup/monitor/*.o
 srcs += src/tup/flock/*.o
 srcs += src/tup/server/*.o
+ifneq ($(TARGET),win32)
+srcs += src/jp_alloc/*.o
+endif
 ifeq (@(TUP_USE_SYSTEM_INIH),y)
 LDFLAGS += -linih
 else

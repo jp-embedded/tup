@@ -20,7 +20,7 @@
 
 #define _ATFILE_SOURCE
 #include "file.h"
-#include "mempool.h"
+#include "jp_alloc/jp_alloc.h"
 #include "debug.h"
 #include "db.h"
 #include "fileio.h"
@@ -45,8 +45,6 @@ static int add_config_files_locked(struct file_info *finfo, struct tup_entry *te
 static int add_parser_files_locked(struct file_info *finfo,
 				   struct tent_entries *root, tupid_t vardt,
 				   int full_deps);
-
-static struct mempool pool = MEMPOOL_INITIALIZER(struct file_entry);
 
 int init_file_info(struct file_info *info, int do_unlink)
 {
@@ -549,7 +547,7 @@ static struct file_entry *new_entry(const char *filename)
 {
 	struct file_entry *fent;
 
-	fent = mempool_alloc(&pool);
+	fent = jp_alloc_sized(sizeof *fent);
 	if(!fent) {
 		return NULL;
 	}
@@ -557,7 +555,7 @@ static struct file_entry *new_entry(const char *filename)
 	fent->filename = strdup(filename);
 	if(!fent->filename) {
 		perror("strdup");
-		mempool_free(&pool, fent);
+		jp_free_sized(fent, sizeof *fent);
 		return NULL;
 	}
 	return fent;
@@ -567,7 +565,7 @@ void del_file_entry(struct file_entry_head *head, struct file_entry *fent)
 {
 	TAILQ_REMOVE(head, fent, list);
 	free(fent->filename);
-	mempool_free(&pool, fent);
+	jp_free_sized(fent, sizeof *fent);
 }
 
 int handle_rename(const char *from, const char *to, struct file_info *info)

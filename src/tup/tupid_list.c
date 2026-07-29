@@ -19,16 +19,14 @@
  */
 
 #include "tupid_list.h"
-#include "mempool.h"
+#include "jp_alloc/jp_alloc.h"
 #include <stdio.h>
-
-static struct mempool pool = MEMPOOL_INITIALIZER(struct tupid_list);
 
 int tupid_list_add_tail(struct tupid_list_head *head, tupid_t tupid)
 {
 	struct tupid_list *tlist;
 
-	tlist = mempool_alloc(&pool);
+	tlist = jp_alloc_sized(sizeof *tlist);
 	if(!tlist) {
 		return -1;
 	}
@@ -40,7 +38,7 @@ int tupid_list_add_tail(struct tupid_list_head *head, tupid_t tupid)
 void tupid_list_delete(struct tupid_list_head *head, struct tupid_list *tlist)
 {
 	TAILQ_REMOVE(head, tlist, list);
-	mempool_free(&pool, tlist);
+	jp_free_sized(tlist, sizeof *tlist);
 }
 
 void free_tupid_list(struct tupid_list_head *head)

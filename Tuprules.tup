@@ -43,6 +43,20 @@ CFLAGS += -fno-common
 CFLAGS += -I$(TUP_VARIANTDIR)/src
 CFLAGS += -I$(TUP_CWD)/src
 
+CXXFLAGS += -g
+CXXFLAGS += -O2
+CXXFLAGS += -W
+CXXFLAGS += -Wall
+ifeq (@(TUP_WERROR),y)
+CXXFLAGS += -Werror
+endif
+ifeq (@(TUP_SANITIZE),y)
+CXXFLAGS += -fsanitize=address
+CXXFLAGS += -fsanitize=undefined
+endif
+CXXFLAGS += -I$(TUP_VARIANTDIR)/src
+CXXFLAGS += -I$(TUP_CWD)/src
+
 ifeq (@(TUP_32_BIT),y)
 CFLAGS += -m32
 LDFLAGS += -m32
@@ -58,11 +72,13 @@ endif
 !ar = |> ^ AR %o^ $(AR) crs %o %f |>
 !dot = |> ^ DOT %f^ dot -Efontname="Vernada, serif" -Nfontname="Vernada, serif" -Efontsize=10 -Nfontsize=10 -Tpng %f > %o |>
 !cp = |> ^ CP %f -> %o^ cp %f %o |>
+!cxx = |> ^ CXX %f^ $(CXX) -std=c++20 -c %f -o %o $(CXXFLAGS) $(CXXFLAGS_%f) |> %B.o
 
 # Default to using gcc to compile. This is overridden on some OSes in the
 # included $(TARGET).tup file, and can be overridden by the user in the
 # tup.config file by setting CONFIG_CC (and/or CONFIG_CC32 on Windows).
 CC = gcc
+CXX = g++
 AR = ar
 
 TUP_MONITOR = null
@@ -80,6 +96,10 @@ endif
 
 ifdef AR
 AR = @(AR)
+endif
+
+ifdef CXX
+CXX = @(CXX)
 endif
 
 # Override AR settings if being built with busybox kconfig

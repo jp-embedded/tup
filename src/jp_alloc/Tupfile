@@ -1,0 +1,4 @@
+include_rules
+ifneq ($(TARGET),win32)
+: foreach *.cpp |> ^ CXX %f^ $(CXX) -std=c++20 -c %f -o %o $(CXXFLAGS) |> %B.o
+endif
