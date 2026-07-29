@@ -531,7 +531,13 @@ out_err:
 static int initialize_depfile(struct server *s, char *depfile, HANDLE *h)
 {
 	wchar_t wdepfile[PATH_MAX];
-	snprintf(depfile, PATH_MAX, "%s\\deps-%i", tuptmpdir, s->id);
+	int len;
+
+	len = snprintf(depfile, PATH_MAX, "%s\\deps-%i", tuptmpdir, s->id);
+	if(len >= PATH_MAX) {
+		fprintf(stderr, "tup error: depfile path is sized incorrectly.\n");
+		return -1;
+	}
 	depfile[PATH_MAX-1] = 0;
 
 	MultiByteToWideChar(CP_UTF8, 0, depfile, -1, wdepfile, PATH_MAX);
