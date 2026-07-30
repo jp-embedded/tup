@@ -1,27 +1,41 @@
-Performance comparison: jp_alloc vs mempool (tup parse)
-=========================================================
-Date: 2026-07-29
+Performance comparison: jp_alloc vs mempool vs system tup (tup parse -q)
+======================================================================
+Date: 2026-07-30
 Project: ~/work/bes_devel.cov
 Setup: 3 variants (debug, debug-cov, release), 2897 Tupfiles, 37774 source files
-Method: Full first-time parse (rm -rf .tup build-* && tup init && tup variant tup/variants/* && tup parse)
-Binaries: REF = c455241c (mempool), NEW = d7afed6b (jp_alloc)
+Method: Full first-time parse (rm -rf .tup build-* && tup init && tup variant tup/variants/* && tup parse -q)
+All binaries built with CFLAGS="-g -O2"
 Iterations: 3 per binary
+
+Binaries
+-------
+REF = c455241c (mempool, pre-jp_alloc)         build/tup from build.sh
+SYS = system tup 0.8-man12 (/usr/bin/tup)      distro package
+NEW = d72b8b5e (jp_alloc v2, floor+realloc+mremap)  build/tup from build.sh
 
 Results
 -------
-                REF (mempool)    NEW (jp_alloc)    Delta
-Time avg:       62.5s            58.8s             -6% faster
-Peak RSS avg:   331 MB           372 MB            +12% (+41 MB)
+                  REF (mempool)   SYS (tup 0.8)   NEW (jp_alloc v2)
+Time avg:         54.9s           58.7s           53.6s
+Peak RSS avg:     332 MB          313 MB          372 MB
+
+Delta vs REF:
+  Time:  -2.4% (slightly faster)       vs SYS: +9.6% faster
+  RSS:   +12%  (+40 MB more memory)    vs SYS: +19% more memory
 
 Per-iteration
 -------------
-REF iter 1: 1:02.46  RSS=331428 KB
-REF iter 2: 1:01.96  RSS=331452 KB
-REF iter 3: 1:03.12  RSS=330940 KB
+REF iter 1: 0:54.51  RSS=332316 KB
+REF iter 2: 0:54.59  RSS=332536 KB
+REF iter 3: 0:55.73  RSS=331240 KB
 
-NEW iter 1:  0:59.52  RSS=371528 KB
-NEW iter 2:  0:58.54  RSS=371468 KB
-NEW iter 3:  0:58.35  RSS=372680 KB
+SYS iter 1: 0:58.73  RSS=312812 KB
+SYS iter 2: 0:58.70  RSS=313568 KB
+SYS iter 3: 0:58.63  RSS=312796 KB
+
+NEW iter 1: 0:53.81  RSS=371964 KB
+NEW iter 2: 0:53.59  RSS=371748 KB
+NEW iter 3: 0:53.41  RSS=371252 KB
 
 Struct sizing (sized API, power-of-2 pools)
 -------------------------------------------
@@ -36,11 +50,23 @@ struct tupid_list:   24 B -> pool  32 B  waste 33%
 
 Analysis
 --------
-Time: jp_alloc is consistently ~6% faster. Lock-free CAS freelists avoid
-mutex contention; headerless sized allocations improve cache density.
+Time: jp_alloc v2 is the fastest at 53.6s avg — 2.4% faster than the mempool
+ref and 9.6% faster than system tup 0.8. The lock-free CAS freelists and
+headerless sized allocations give a consistent edge. Optimizations applied in
+v2 (pool floor 32->16, jp_realloc_sized same-page fix, mremap for large
+reallocs) are edge-case improvements that don't significantly affect parse
+time since parse rarely does large reallocs.
 
-RSS: +41 MB (12%) from power-of-2 rounding. Old mempool packed objects at
-exact sizeof; jp_alloc rounds up to next power of 2. tent_tree (60% waste)
-and the 24-byte structs (33% waste) are the biggest contributors.
+RSS: jp_alloc v2 uses 372 MB vs 332 MB for mempool (+12%) and 313 MB for
+system tup (+19%). The increase is from power-of-2 rounding waste (up to 60%
+for struct tent_tree). The old mempool packed objects at exact sizeof with
+zero waste.
 
-Trade-off: 6% faster parse for 12% more transient memory (freed at exit).
+Trade-off: ~2-10% faster parse for ~12% more transient memory (freed at exit).
+The memory overhead is inherent to the buddy-allocator design and only matters
+if peak RSS is a constraint.
+
+--- Earlier v1 benchmark (d7afed6b, 2026-07-29, less precise) ---
+v1 vs mempool: 58.8s vs 62.5s (-6%), 372 MB vs 331 MB (+12%)
+v2 vs v1: identical time/RSS (same codepath for parse; the v2 optimizations
+only affect large reallocs which parse doesn't exercise).
