@@ -195,13 +195,11 @@ bool is_pow2(size_t n)
 
 /* ---- Headerless sized pool operations ---- */
 
-/* Floor at max_align_t so the in-band freelist link (void*) fits
- * and every block is max-aligned. This collapses pools 0-3 into
- * the 16-byte pool on 64-bit platforms. */
+/* Floor at 16 bytes so the in-band freelist link (void*) fits
+ * and every block is 16-byte aligned. */
 size_t pool_id_sized(size_t size)
 {
-   size_t min_size = sizeof(std::max_align_t);
-   if (size < min_size) size = min_size;
+   if (size < 16) size = 16;
    return std::bit_width(size - 1);
 }
 
@@ -363,8 +361,13 @@ extern "C" void *jp_realloc_sized(void *mem, size_t oldsz, size_t newsz)
    /* If both old and new fall in the same pool bucket, no copy needed */
    size_t old_pid = pool_id_sized(oldsz);
    size_t new_pid = pool_id_sized(newsz);
-   if (old_pid == new_pid && old_pid < JP_ALLOC_POOL_COUNT) {
-      return mem;
+   if (old_pid == new_pid) {
+      if (old_pid < JP_ALLOC_POOL_COUNT)
+         return mem;		/* same pool bucket */
+      /* both large: compare page-rounded sizes */
+      size_t ps_mask = os_page_size() - 1;
+      if (((oldsz + ps_mask) & ~ps_mask) == ((newsz + ps_mask) & ~ps_mask))
+         return mem;
    }
    void *new_mem = jp_alloc_sized(newsz);
    if (new_mem) {
@@ -458,7 +461,6 @@ void *jp_calloc(size_t num, size_t nsize)
 
 void *jp_realloc(void *mem, size_t new_size)
 {
-   // todo: consider using mremap for large allocations
         size_t size = 0;
         if (mem != nullptr) {
            header *h = static_cast<header*>(mem) - 1;
@@ -467,6 +469,26 @@ void *jp_realloc(void *mem, size_t new_size)
            size -= sizeof(header);
         }
         if (new_size > size) {
+           /* Try mremap for large (mmap'd) allocations to avoid copying */
+           if (mem != nullptr) {
+              header *h = static_cast<header*>(mem) - 1;
+              size_t hdr_size = h->s.size;
+              if (hdr_size >= JP_ALLOC_POOL_COUNT) {
+                 size_t pre_padding = reinterpret_cast<size_t>(mem) & (os_page_size() - 1);
+                 char *base = reinterpret_cast<char*>(h) + pre_padding;
+#ifdef __linux__
+                 size_t new_total = new_size + sizeof(header) + pre_padding;
+                 size_t ps_mask = os_page_size() - 1;
+                 new_total = (new_total + ps_mask) & ~ps_mask;
+                 void *new_base = mremap(base, hdr_size + pre_padding, new_total, MREMAP_MAYMOVE);
+                 if (new_base != MAP_FAILED) {
+                    header *new_h = reinterpret_cast<header*>(static_cast<char*>(new_base) + pre_padding);
+                    new_h->s.size = new_total;
+                    return new_h + 1;
+                 }
+#endif
+              }
+           }
 #ifdef DEBUG
            ++stat.jp_realloc_relocate;
 #endif

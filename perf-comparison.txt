@@ -1,0 +1,46 @@
+Performance comparison: jp_alloc vs mempool (tup parse)
+=========================================================
+Date: 2026-07-29
+Project: ~/work/bes_devel.cov
+Setup: 3 variants (debug, debug-cov, release), 2897 Tupfiles, 37774 source files
+Method: Full first-time parse (rm -rf .tup build-* && tup init && tup variant tup/variants/* && tup parse)
+Binaries: REF = c455241c (mempool), NEW = d7afed6b (jp_alloc)
+Iterations: 3 per binary
+
+Results
+-------
+                REF (mempool)    NEW (jp_alloc)    Delta
+Time avg:       62.5s            58.8s             -6% faster
+Peak RSS avg:   331 MB           372 MB            +12% (+41 MB)
+
+Per-iteration
+-------------
+REF iter 1: 1:02.46  RSS=331428 KB
+REF iter 2: 1:01.96  RSS=331452 KB
+REF iter 3: 1:03.12  RSS=330940 KB
+
+NEW iter 1:  0:59.52  RSS=371528 KB
+NEW iter 2:  0:58.54  RSS=371468 KB
+NEW iter 3:  0:58.35  RSS=372680 KB
+
+Struct sizing (sized API, power-of-2 pools)
+-------------------------------------------
+struct node:         96 B -> pool 128 B  waste 33%
+struct edge:         56 B -> pool  64 B  waste 14%
+struct tup_entry:   248 B -> pool 256 B  waste  3%
+struct file_entry:   24 B -> pool  32 B  waste 33%
+struct path_element: 32 B -> pool  32 B  waste  0%
+struct tent_tree:    40 B -> pool  64 B  waste 60%
+struct tent_list:    24 B -> pool  32 B  waste 33%
+struct tupid_list:   24 B -> pool  32 B  waste 33%
+
+Analysis
+--------
+Time: jp_alloc is consistently ~6% faster. Lock-free CAS freelists avoid
+mutex contention; headerless sized allocations improve cache density.
+
+RSS: +41 MB (12%) from power-of-2 rounding. Old mempool packed objects at
+exact sizeof; jp_alloc rounds up to next power of 2. tent_tree (60% waste)
+and the 24-byte structs (33% waste) are the biggest contributors.
+
+Trade-off: 6% faster parse for 12% more transient memory (freed at exit).
