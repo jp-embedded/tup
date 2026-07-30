@@ -1,5 +1,5 @@
-Performance comparison: jp_alloc vs mempool vs system tup (tup parse -q)
-======================================================================
+Performance comparison: jp_alloc vs system tup (tup parse -q)
+=============================================================
 Date: 2026-07-30
 Project: ~/work/bes_devel.cov
 Setup: 3 variants (debug, debug-cov, release), 2897 Tupfiles, 37774 source files
@@ -9,64 +9,46 @@ Iterations: 3 per binary
 
 Binaries
 -------
-REF = c455241c (mempool, pre-jp_alloc)         build/tup from build.sh
-SYS = system tup 0.8-man12 (/usr/bin/tup)      distro package
-NEW = d72b8b5e (jp_alloc v2, floor+realloc+mremap)  build/tup from build.sh
+SYS = system tup 0.8-man12 (/usr/bin/tup)      distro package, libc malloc
+NEW = jp_alloc (C conversion, d72b8b5e+)        build/tup from build.sh
 
 Results
 -------
-                  REF (mempool)   SYS (tup 0.8)   NEW (jp_alloc v2)
-Time avg:         54.9s           58.7s           53.6s
-Peak RSS avg:     332 MB          313 MB          372 MB
-
-Delta vs REF:
-  Time:  -2.4% (slightly faster)       vs SYS: +9.6% faster
-  RSS:   +12%  (+40 MB more memory)    vs SYS: +19% more memory
+                  SYS (tup 0.8)    NEW (jp_alloc C)
+Time avg:         58.6s            53.6s             -8.5% faster
+Peak RSS avg:     313 KB           372 KB             +19%  (+59 MB)
 
 Per-iteration
 -------------
-REF iter 1: 0:54.51  RSS=332316 KB
-REF iter 2: 0:54.59  RSS=332536 KB
-REF iter 3: 0:55.73  RSS=331240 KB
+SYS iter 1: 0:59.15  RSS=313216 KB
+SYS iter 2: 0:58.25  RSS=313496 KB
+SYS iter 3: 0:58.45  RSS=312764 KB
 
-SYS iter 1: 0:58.73  RSS=312812 KB
-SYS iter 2: 0:58.70  RSS=313568 KB
-SYS iter 3: 0:58.63  RSS=312796 KB
-
-NEW iter 1: 0:53.81  RSS=371964 KB
-NEW iter 2: 0:53.59  RSS=371748 KB
-NEW iter 3: 0:53.41  RSS=371252 KB
-
-Struct sizing (sized API, power-of-2 pools)
--------------------------------------------
-struct node:         96 B -> pool 128 B  waste 33%
-struct edge:         56 B -> pool  64 B  waste 14%
-struct tup_entry:   248 B -> pool 256 B  waste  3%
-struct file_entry:   24 B -> pool  32 B  waste 33%
-struct path_element: 32 B -> pool  32 B  waste  0%
-struct tent_tree:    40 B -> pool  64 B  waste 60%
-struct tent_list:    24 B -> pool  32 B  waste 33%
-struct tupid_list:   24 B -> pool  32 B  waste 33%
+NEW iter 1: 0:53.71  RSS=373292 KB
+NEW iter 2: 0:53.72  RSS=371700 KB
+NEW iter 3: 0:53.40  RSS=372276 KB
 
 Analysis
 --------
-Time: jp_alloc v2 is the fastest at 53.6s avg — 2.4% faster than the mempool
-ref and 9.6% faster than system tup 0.8. The lock-free CAS freelists and
-headerless sized allocations give a consistent edge. Optimizations applied in
-v2 (pool floor 32->16, jp_realloc_sized same-page fix, mremap for large
-reallocs) are edge-case improvements that don't significantly affect parse
-time since parse rarely does large reallocs.
+Time: jp_alloc is 8.5% faster than system tup 0.8. Lock-free CAS
+freelists and headerless sized allocations give a consistent edge.
 
-RSS: jp_alloc v2 uses 372 MB vs 332 MB for mempool (+12%) and 313 MB for
-system tup (+19%). The increase is from power-of-2 rounding waste (up to 60%
-for struct tent_tree). The old mempool packed objects at exact sizeof with
-zero waste.
+RSS: jp_alloc uses +59 MB (19%) more than system tup. The increase is
+from power-of-2 rounding waste (up to 60% for struct tent_tree). libc
+malloc uses tighter size classes with less per-object waste.
 
-Trade-off: ~2-10% faster parse for ~12% more transient memory (freed at exit).
-The memory overhead is inherent to the buddy-allocator design and only matters
-if peak RSS is a constraint.
+Trade-off: ~8.5% faster parse for ~19% more transient memory (freed
+at exit). The memory overhead is inherent to the buddy-allocator design.
 
---- Earlier v1 benchmark (d7afed6b, 2026-07-29, less precise) ---
-v1 vs mempool: 58.8s vs 62.5s (-6%), 372 MB vs 331 MB (+12%)
-v2 vs v1: identical time/RSS (same codepath for parse; the v2 optimizations
-only affect large reallocs which parse doesn't exercise).
+Changes in this round
+---------------------
+- Converted jp_alloc.cpp -> jp_alloc.c (pure C11, no C++ dependency)
+- Added Windows VirtualAlloc backend (all platforms now use jp_alloc)
+- Added TUP_USE_JP_ALLOC=n config opt-out for safety
+- Stripped all C++ build wiring (CXX, CXXFLAGS, !cxx, -lstdc++/-lc++)
+- jp_alloc.c compiled by existing !cc rule like any other .c file
+
+--- Earlier v1 benchmark (d7afed6b vs mempool, 2026-07-29) ---
+jp_alloc v1 vs mempool: 58.8s vs 62.5s (-6%), 372 MB vs 331 MB (+12%)
+jp_alloc v2 vs mempool: 53.6s vs 54.9s (-2.4%), 372 MB vs 332 MB (+12%)
+System tup vs mempool:  58.6s vs 54.9s (+6.7% slower), 313 MB vs 332 MB (-6%)

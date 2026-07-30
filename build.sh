@@ -31,18 +31,16 @@ else
 fi
 LDFLAGS="$LDFLAGS -lm"
 default_cc=gcc
-default_cxx=g++
 case "$os" in
 	Linux)
 	plat_files="$plat_files ../src/compat/dummy.c"
 	plat_files="$plat_files ../src/compat/utimensat_linux.c"
-	plat_ldflags="$plat_ldflags -lstdc++"
 	;;
 	SunOS)
 	plat_files="$plat_files ../src/compat/dir_mutex.c"
 	plat_files="$plat_files ../src/compat/mkdirat.c"
 	plat_files="$plat_files ../src/compat/readlinkat.c"
-	plat_ldflags="$plat_ldflags -lsocket -lstdc++"
+	plat_ldflags="$plat_ldflags -lsocket"
 	plat_cflags="$plat_cflags -D_REENTRANT"
 	;;
 	Darwin)
@@ -50,26 +48,28 @@ case "$os" in
 	plat_files="$plat_files ../src/compat/clearenv.c "
 	plat_cflags="$plat_cflags -include ../src/compat/macosx.h"
 	default_cc=clang
-	default_cxx=clang++
-	plat_ldflags="$plat_ldflags -lc++"
 	;;
 	FreeBSD)
 	plat_files="$plat_files ../src/compat/dummy.c"
 	plat_files="$plat_files ../src/compat/utimensat_linux.c"
 	plat_files="$plat_files ../src/compat/clearenv.c"
 	default_cc=clang
-	default_cxx=clang++
-	plat_ldflags="$plat_ldflags -lc++"
 	;;
 	NetBSD)
 	plat_files="$plat_files ../src/compat/dummy.c"
 	plat_files="$plat_files ../src/compat/clearenv.c"
 	plat_cflags="$plat_cflags -include ../src/compat/netbsd.h"
-	plat_ldflags="$plat_ldflags -lstdc++"
 	;;
 esac
 : ${CC:=$default_cc}
-: ${CXX:=$default_cxx}
+
+# jp_alloc is enabled by default. Set TUP_USE_JP_ALLOC=n to fall back to
+# libc malloc (e.g. for debugging or platforms where the override causes issues).
+use_jp_alloc=${TUP_USE_JP_ALLOC:-y}
+if [ "$use_jp_alloc" = "y" ]; then
+	plat_files="$plat_files ../src/jp_alloc/jp_alloc.c"
+	CFLAGS="$CFLAGS -DJP_ALLOC_COMPILED"
+fi
 
 rm -rf build
 echo "  mkdir build"
@@ -104,9 +104,6 @@ done
 
 echo "  bootstrap CC $CFLAGS ../src/sqlite3/sqlite3.c"
 $CC $CFLAGS -c ../src/sqlite3/sqlite3.c -DSQLITE_TEMP_STORE=2 -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION $plat_cflags
-
-echo "  bootstrap CXX $CFLAGS ../src/jp_alloc/jp_alloc.cpp"
-$CXX -std=c++20 -c ../src/jp_alloc/jp_alloc.cpp -o jp_alloc.o -I../src $CFLAGS
 
 echo "  bootstrap LD tup $LDFLAGS"
 objs="$(echo *.o)"

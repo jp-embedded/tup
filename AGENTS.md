@@ -5,7 +5,6 @@
 - Rebuild after source changes with `./tup` once bootstrapped.
 - Active CI is `.github/workflows/all.yml` (GitHub Actions): Ubuntu runs `./bootstrap.sh` then `cd test && ./test.sh --keep-going`; `.travis.yml` is legacy.
 - On Linux the default build server is `fuse3` (`linux.tup`, `build.sh`), so `pkg-config fuse3`/FUSE3 headers are needed unless you override `TUP_SERVER`.
-- A C++20 compiler (`g++`/`clang++`) is required on non-Windows for `src/jp_alloc/jp_alloc.cpp`; platform `.tup` files set `CXX` and add the C++ stdlib (`-lstdc++`/`-lc++`) to `LDFLAGS`.
 - Use `./bootstrap-ldpreload.sh` for an LD_PRELOAD-server build; it warns if `tup.config` does not set `CONFIG_TUP_SERVER=ldpreload` for the full Tup build.
 - Use `./bootstrap-nofuse.sh` only to generate and run a temporary shell build script; its resulting `tup` still needs FUSE on platforms whose server uses FUSE.
 - Run all tests from `test/` with `./test.sh`; run one test with `./test.sh t0000-init.sh`; use `./test.sh --keep-going` or `-k` to continue after failures.
@@ -19,10 +18,10 @@
 - `src/luabuiltin/luabuiltin.h` is generated from `src/luabuiltin/builtin.lua` using the built Lua and `xxd.lua`; do not edit the generated header as source.
 
 ## Memory Allocation
-- `jp_alloc` is vendored under `src/jp_alloc/` (GPL-2.0-or-later, from https://github.com/jp-embedded/jp_alloc). It overrides libc `malloc`/`free`/`calloc`/`realloc` globally on non-Windows, so tup, SQLite, and Lua all route through it automatically.
-- The **sized API** (`jp_alloc_sized`/`jp_free_sized`/`jp_realloc_sized` in `jp_alloc.h`) is headerless — when the caller knows the size at free time, the per-block 16-byte header is eliminated via in-band freelist links. Former `mempool` callers (graph, entry, file, pel_group, tent_tree, tent_list, tupid_list) use this API.
+- `jp_alloc` is vendored under `src/jp_alloc/` (GPL-2.0-or-later, from https://github.com/jp-embedded/jp_alloc), as pure C11. It overrides libc `malloc`/`free`/`calloc`/`realloc` globally, so tup, SQLite, and Lua all route through it automatically. Uses `mmap` on POSIX and `VirtualAlloc` on Windows.
+- The **sized API** (`jp_alloc_sized`/`jp_free_sized`/`jp_realloc_sized` in `jp_alloc.h`) is headerless — when the caller knows the size at free time, the per-block header is eliminated via in-band freelist links. Former `mempool` callers (graph, entry, file, pel_group, tent_tree, tent_list, tupid_list) use this API.
 - Do NOT mix sized and unsized (malloc/free) API calls on the same pointer — they use separate pool arrays with different block layouts.
-- On Windows, `jp_alloc.h` provides inline libc-malloc fallbacks; jp_alloc's `.cpp` is excluded from the Windows build (`#ifndef _WIN32` + `ifneq ($(TARGET),win32)`).
+- Set `CONFIG_TUP_USE_JP_ALLOC=n` in `tup.config` to disable jp_alloc and fall back to libc malloc (sized API degrades to `malloc`/`free` wrappers). Useful for debugging or if jp_alloc's malloc override causes issues on a platform.
 - `jp_alloc_reset()` is a no-op called under `TUP_VALGRIND` (replaces the old `mempool_clear()`); pool memory stays "still reachable" so valgrind doesn't report errors.
 - The old `src/tup/mempool.c`/`.h` was removed; per-thread `_Thread_local` pools were replaced by jp_alloc's global lock-free pools.
 

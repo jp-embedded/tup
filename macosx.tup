@@ -1,5 +1,4 @@
 CC = clang
-CXX = clang++
 
 # clearenv() wrapper
 CFLAGS += -include compat/macosx.h
@@ -7,5 +6,3 @@ CFLAGS += -include compat/macosx.h
 TUP_SUID_GROUP = wheel
 
 TUP_SERVER = fuse
-
-LDFLAGS += -lc++

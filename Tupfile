@@ -21,7 +21,7 @@ srcs += src/tup/tup/*.o
 srcs += src/tup/monitor/*.o
 srcs += src/tup/flock/*.o
 srcs += src/tup/server/*.o
-ifneq ($(TARGET),win32)
+ifeq ($(TUP_USE_JP_ALLOC),y)
 srcs += src/jp_alloc/*.o
 endif
 ifeq (@(TUP_USE_SYSTEM_INIH),y)
