@@ -45,7 +45,10 @@ CFLAGS += -I$(TUP_CWD)/src
 
 # jp_alloc is enabled by default. Set CONFIG_TUP_USE_JP_ALLOC=n in
 # tup.config to fall back to libc malloc.
+TUP_USE_JP_ALLOC = @(TUP_USE_JP_ALLOC)
+ifeq ($(TUP_USE_JP_ALLOC),)
 TUP_USE_JP_ALLOC = y
+endif
 ifeq ($(TUP_USE_JP_ALLOC),y)
 CFLAGS += -DJP_ALLOC_COMPILED
 endif
@@ -76,6 +79,11 @@ TUP_MONITOR = null
 TUP_SUID_GROUP = root
 TUP_USE_SYSTEM_PCRE = y
 include $(TARGET).tup
+
+# jp_alloc tagged-pointer CAS needs cmpxchg16b on x86-64
+ifeq (@(TUP_ARCH),x86_64)
+CFLAGS += -mcx16
+endif
 
 ifdef CC
 CC = @(CC)

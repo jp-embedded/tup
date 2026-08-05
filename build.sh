@@ -69,6 +69,10 @@ use_jp_alloc=${TUP_USE_JP_ALLOC:-y}
 if [ "$use_jp_alloc" = "y" ]; then
 	plat_files="$plat_files ../src/jp_alloc/jp_alloc.c"
 	CFLAGS="$CFLAGS -DJP_ALLOC_COMPILED"
+	# jp_alloc tagged-pointer CAS needs cmpxchg16b on x86-64
+	if [ "$(uname -m)" = "x86_64" ] || [ "$(uname -m)" = "amd64" ]; then
+		CFLAGS="$CFLAGS -mcx16"
+	fi
 fi
 
 rm -rf build
