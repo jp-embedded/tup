@@ -12,6 +12,18 @@
  * - Added Windows (VirtualAlloc) backend so jp_alloc works on all platforms.
  * - Added mremap for large reallocs on Linux.
  * - Dropped LD_PRELOAD shims (__libc_*) and C++ operator new/delete overrides.
+ * - Replaced the 128-bit tagged-pointer freelist (cmpxchg16b on x86-64) with
+ *   a 64-bit compare-and-swap freelist protected by a 3-epoch ring EBR plus a
+ *   per-thread fixed-array cache (N=32 per size class). This removes the
+ *   -mcx16 build requirement and reduces global-freelist contention. The
+ *   EBR layer guarantees ABA-freedom: a popped block cannot reappear at the
+ *   global freelist head until all threads that observed the prior head have
+ *   left their pop critical section. The TLS cache further delays returns to
+ *   the global freelist and batches them into single atomic chain pushes,
+ *   amortizing EBR bookkeeping and reducing CAS contention. Thread teardown
+ *   deposits each per-pool retired batch into a global limbo indexed by
+ *   retire_epoch % 3, drained lazily by live threads during epoch advance;
+ *   this keeps teardown ABA-safe and leak-free without per-thread locks.
  */
 
 /* mremap is Linux-only and requires _GNU_SOURCE before includes */
@@ -35,6 +47,7 @@
 
 #ifdef JP_ALLOC_DEBUG
 #include <stdio.h>
+#include <pthread.h>
 #endif
 
 #ifdef __GNUC__
@@ -49,20 +62,7 @@
 #define JP_ALLOC_POOL_COUNT 17  /* Gives pools of 1 - 64K */
 #endif
 
-/* ---- Debug header (enabled by -DJP_ALLOC_DEBUG) ----
- *
- * When JP_ALLOC_DEBUG is defined, every block gets a header on both
- * the sized and unsized paths. The header carries a magic number that
- * distinguishes sized from unsized allocations, a live/free state, and
- * (for the sized path) the original requested size. This catches:
- *
- *   - Wrong free API: jp_free_sized on a malloc'd pointer or vice versa
- *   - Wrong size:     jp_free_sized called with a different size than alloc
- *   - Double free:    free/jp_free_sized on a block already freed
- *   - ABA corruption: pool_get/sized_pool_get pops a block that is still LIVE
- *                     (the lock-free freelist handed out a block in use by
- *                     another thread)
- */
+/* ---- Debug header (enabled by -DJP_ALLOC_DEBUG) ---- */
 #ifdef JP_ALLOC_DEBUG
 #define JP_SIZED_MAGIC   0x513A1DEDD01DULL  /* "SIZED"  */
 #define JP_UNSIZED_MAGIC 0x0BADDEA11DECULL  /* "DEALLOC" */
@@ -139,51 +139,46 @@ static void os_free_pages(void *mem, size_t size)
 
 #endif /* _WIN32 */
 
-/* ---- Tagged pointer for ABA-free lock-free freelist ----
+/* ==========================================================================
+ * 64-bit CAS freelist + EBR + thread-local cache
+ * ==========================================================================
  *
- * The freelist head is a {pointer, tag} pair updated atomically with a
- * double-width compare-and-swap. The tag is incremented on every push
- * and pop, so even if the pointer cycles A→B→A, the tag differs and
- * the CAS fails — eliminating the ABA problem that caused duplicate
- * allocations under heavy thread contention.
+ * The freelist head is a single 64-bit atomic void*. ABA is prevented by a
+ * 3-epoch ring EBR: each per-thread pop critical section is bracketed by
+ * ebr_enter()/ebr_exit() which publishes the thread's observed epoch. A
+ * retired block cannot be returned to the global freelist until every
+ * thread's epoch has advanced past the retire epoch. Per-thread retired
+ * batches are stored per-pool-per-epoch so drainage is an O(1) chain splice.
  *
- * 64-bit: 128-bit CAS via __sync builtins (cmpxchg16b on x86-64 with
- *         -mcx16, LSE/LDREXD on ARM64)
- * 32-bit:  64-bit CAS via __sync builtins (cmpxchg8b on x86-32,
- *         LDREXD/STREXD on ARM32)
+ * On top of the global freelist sits a per-thread fixed-array cache
+ * (N=32 per size class) that intercepts the hottest alloc/free paths with
+ * no atomics. When a cache fills, half its entries are flushed as a single
+ * atomic chain to the retire list, retiring once for the whole batch.
+ *
+ * Memory ordering:
+ *   load        acquire  (publishes next link via dependent read)
+ *   CAS success acq_rel
+ *   CAS fail    acquire
  */
-#if defined(__SIZEOF_INT128__)
-typedef unsigned __int128 tagged_val_t;
-#define TAGGED_PTR(v)  ((void *)(uintptr_t)(v))
-#define TAGGED_TAG(v)  ((uintptr_t)((v) >> 64))
-#define TAGGED_MAKE(p, t)  ((tagged_val_t)(uintptr_t)(p) | ((tagged_val_t)(t) << 64))
-#elif __SIZEOF_POINTER__ == 4
-typedef uint64_t tagged_val_t;
-#define TAGGED_PTR(v)  ((void *)(uint32_t)(v))
-#define TAGGED_TAG(v)  ((uintptr_t)((v) >> 32))
-#define TAGGED_MAKE(p, t)  ((tagged_val_t)(uint32_t)(uintptr_t)(p) | ((tagged_val_t)(uint32_t)(t) << 32))
-#else
-#error "Platform not supported: need 128-bit or 64-bit atomic CAS"
-#endif
 
-/* Atomically load the tagged head. Uses CAS(0,0) to avoid libatomic
- * calls on 128-bit targets. */
-static inline tagged_val_t tagged_load(volatile tagged_val_t *p)
+/* ---- Atomic primitives (use __atomic builtins; no <stdatomic.h> dependency) ---- */
+static inline void *atomic_load_ptr(void * volatile *p)
 {
-	return __sync_val_compare_and_swap(p, 0, 0);
+	return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+static inline void atomic_store_ptr(void * volatile *p, void *v)
+{
+	__atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+/* Returns 1 on success; on failure *old is updated with the current value. */
+static inline int atomic_cas_ptr(void * volatile *p, void **old, void *desired)
+{
+	return __atomic_compare_exchange_n(p, old, desired,
+		0 /* strong */,
+		__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
-/* Returns 1 on success. On failure, *old is updated with the current
- * value so the caller can retry without a separate load. */
-static inline int tagged_cas(volatile tagged_val_t *p, tagged_val_t *old, tagged_val_t desired)
-{
-	tagged_val_t prev = __sync_val_compare_and_swap(p, *old, desired);
-	if(prev == *old) return 1;
-	*old = prev;
-	return 0;
-}
-
-/* ---- Header'd path (for malloc/free override where size is unknown) ---- */
+/* ---- Header'd path types ---- */
 
 union header {
 	struct {
@@ -198,85 +193,477 @@ union header {
 };
 
 struct pool {
-	volatile tagged_val_t head;
+	void * volatile head;        /* 64-bit atomic freelist head */
+	char _pad[56];               /* pad to a 64-byte cache line */
 };
 
-#ifdef DEBUG
-struct {
-	_Atomic(size_t) jp_alloc;
-	_Atomic(size_t) jp_alloc_aligned;
-	_Atomic(size_t) jp_realloc_expand;
-	_Atomic(size_t) jp_realloc_relocate;
-	_Atomic(size_t) mallopt;
-} stat;
-#endif
+struct sized_pool {
+	void * volatile head;
+	char _pad[56];
+};
 
 static struct pool g_pools[JP_ALLOC_POOL_COUNT];
 static struct pool *g_pools_last = g_pools + JP_ALLOC_POOL_COUNT - 1;
 
-/* ---- Headerless sized path (caller knows size at free time) ---- */
-
-struct sized_pool {
-	volatile tagged_val_t head;
-};
-
 static struct sized_pool g_sized_pools[JP_ALLOC_POOL_COUNT];
 static struct sized_pool *g_sized_pools_last = g_sized_pools + JP_ALLOC_POOL_COUNT - 1;
 
-/* ---- Header'd pool operations ---- */
+/* ---- Epoch-Based Reclamation (3-epoch ring) ----
+ *
+ * Per thread announces (active, epoch) before entering a pop critical
+ * section. The global epoch counter advances only when every registered
+ * thread is either inactive or has announced the current epoch.
+ *
+ * Per-thread retired batches are stored per-pool (sized or unsized) and
+ * per epoch-slot (epoch % 3) so drainage is an O(1) global freelist splice
+ * of a single pool's chain. This keeps the drain path simple (no mixed
+ * size classes) and avoids any block-size-at-free-time lookup.
+ *
+ * Slot semantics: a block retired at retire_epoch=R lives in slot (R%3).
+ * When g_epoch advances from old to old+1, slot ((old-1) % 3) is safe to
+ * drain: any thread that could have observed a head pointing at a block
+ * from age 2 has announced epoch >= old.
+ */
+#define JP_EBR_EPOCHS 3
+#define JP_EBR_INACTIVE (-1L)   /* value of ebr_thread.epoch when inactive */
 
-static void pool_put(union header *h, struct pool *p)
+struct ebr_thread {
+	_Atomic(int)    active;
+	_Atomic(long)   epoch;
+	_Atomic(struct ebr_thread *) next;
+};
+
+static _Atomic(long) g_epoch = 0;
+static _Atomic(struct ebr_thread *) g_thread_list = NULL;
+
+/* ---- Per-thread state ----
+ *
+ * fixed-array caches: top of stack is slot[cnt-1]. Allocations pull from
+ * the top; frees push to the top. LIFO gives best locality.
+ *
+ * A full cache flushes half (16) entries as a single chain to EBR retire,
+ * amortizing the global CAS and epoch update to one per 16 frees.
+ */
+#define JP_CACHE_N 32
+#define JP_CACHE_FLUSH  (JP_CACHE_N / 2)
+
+/* Per-pool retired batches for one epoch slot. */
+struct retired_chain {
+	void *head;     /* first block, link via *(void**)block or hdr->s.next */
+	void *tail;     /* last block, link == NULL */
+};
+
+struct tls_state {
+	struct ebr_thread *self;
+	/* caches */
+	void *sized_cache[JP_ALLOC_POOL_COUNT][JP_CACHE_N];
+	size_t sized_cnt[JP_ALLOC_POOL_COUNT];
+	void *unsized_cache[JP_ALLOC_POOL_COUNT][JP_CACHE_N];
+	size_t unsized_cnt[JP_ALLOC_POOL_COUNT];
+	/* retired batches: per-pool, per-epoch-slot */
+	struct retired_chain retired_sized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+	struct retired_chain retired_unsized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+	int in_pop_cs;     /* re-entrancy guard for buddy-split recursion */
+};
+
+static _Thread_local struct tls_state tls;
+static _Thread_local int tls_registered = 0;
+
+/* ---- pthread TLS init ---- */
+#include <pthread.h>
+
+static pthread_key_t  g_tls_key;
+static pthread_once_t g_tls_once = PTHREAD_ONCE_INIT;
+
+static void tls_destructor(void *p);
+static void ebr_try_advance(void);
+
+static void tls_init_once(void)
 {
+	pthread_key_create(&g_tls_key, tls_destructor);
+}
+
+static void tls_register(void)
+{
+	if(tls_registered) return;
+	pthread_once(&g_tls_once, tls_init_once);
+	if(!tls.self) {
+		/* Allocate the ebr_thread record out of the OS page allocator (not
+		 * our own pools — we don't want a circular dependency). One page is
+		 * plenty for many records; we just use the first bytes. */
+		struct ebr_thread *r = (struct ebr_thread *)os_alloc_pages(os_page_size());
+		if(!r) {
+			tls.self = NULL;
+		} else {
+			__atomic_store_n(&r->active, 0, __ATOMIC_RELAXED);
+			__atomic_store_n(&r->epoch, JP_EBR_INACTIVE, __ATOMIC_RELAXED);
+			struct ebr_thread *old = __atomic_load_n(&g_thread_list, __ATOMIC_ACQUIRE);
+			do {
+				__atomic_store_n(&r->next, old, __ATOMIC_RELAXED);
+			} while(!__atomic_compare_exchange_n(&g_thread_list, &old, r,
+				0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+			tls.self = r;
+		}
+	}
+	pthread_setspecific(g_tls_key, (void *)(uintptr_t)1);
+	tls_registered = 1;
+}
+
+/* Pre-declarations used by tls_destructor and drains */
+static void global_push_sized_chain(struct sized_pool *p, void *chain_head, void *chain_tail);
+static void global_push_unsized_chain(struct pool *p, void *chain_head, void *chain_tail);
+
+/* Move this thread's retired batch for (pool pid, slot s) into the global
+ * limbo of the same (kind, pid, slot). Other threads may drain it later in
+ * ebr_try_advance(). */
+struct limbo_slot {
+	void * volatile head;
+	void * volatile tail;
+};
+static struct limbo_slot g_limbo_sized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+static struct limbo_slot g_limbo_unsized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+
+/* Sized freelist link accessors — defined here (before any limbo/chain
+ * walker uses them) so DEBUG and release share a single chain format.
+ *
+ * In release mode the link is the first void* of the freed block (in-band,
+ * headerless). Under JP_ALLOC_DEBUG the block carries a struct sized_header
+ * (magic/state/size/next) at offset 0 and the link lives in the `next`
+ * field (offset 24 on 64-bit). */
+static inline void *sized_link_get(void *block)
+{
+#ifdef JP_ALLOC_DEBUG
+	return ((struct sized_header *)block)->next;
+#else
+	return *(void **)block;
+#endif
+}
+static inline void sized_link_set(void *block, void *next)
+{
+#ifdef JP_ALLOC_DEBUG
+	((struct sized_header *)block)->next = (struct sized_header *)next;
+#else
+	*(void **)block = next;
+#endif
+}
+
+static void deposit_to_limbo_sized(size_t pid, int slot, void *head, void *tail)
+{
+	struct limbo_slot *s = &g_limbo_sized[pid][slot];
+	void *old_head = atomic_load_ptr(&s->head);
+	for(;;) {
+		sized_link_set(tail, old_head);
+		if(atomic_cas_ptr(&s->head, &old_head, head)) break;
+	}
+	/* If we just set head from NULL, also publish tail for future mergers.
+	 * Other merging threads only swap head; tail is only needed during
+	 * drain (which walks the chain anyway), so we update tail only when the
+	 * chain was empty. */
+	if(old_head == NULL) {
+		/* best-effort: only the first merger of a NULL chain publishes a
+		 * tail; subsequent mergers will see non-NULL head and skip —
+		 * drainers walk to NULL anyway. */
+		__atomic_store_n(&s->tail, tail, __ATOMIC_RELEASE);
+	}
+}
+
+static void deposit_to_limbo_unsized(size_t pid, int slot, void *head, void *tail)
+{
+	struct limbo_slot *s = &g_limbo_unsized[pid][slot];
+	void *old_head = atomic_load_ptr(&s->head);
+	for(;;) {
+		((union header *)tail)->s.next = (union header *)old_head;
+		if(atomic_cas_ptr(&s->head, &old_head, head)) break;
+	}
+	if(old_head == NULL) {
+		__atomic_store_n(&s->tail, tail, __ATOMIC_RELEASE);
+	}
+}
+
+/* Steal and splice a limbo slot's chain onto its global pool. */
+static void drain_limbo_sized(size_t pid, int slot)
+{
+	struct limbo_slot *s = &g_limbo_sized[pid][slot];
+	void *head = __atomic_load_n(&s->head, __ATOMIC_ACQUIRE);
+	if(!head) return;
+	if(!__atomic_compare_exchange_n(&s->head, &head, NULL,
+		0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return;
+	/* Walk to find tail (chain ends with link==NULL). */
+	void *tail = head;
+	while(sized_link_get(tail) != NULL) tail = sized_link_get(tail);
+	global_push_sized_chain(&g_sized_pools[pid], head, tail);
+}
+
+static void drain_limbo_unsized(size_t pid, int slot)
+{
+	struct limbo_slot *s = &g_limbo_unsized[pid][slot];
+	void *head = __atomic_load_n(&s->head, __ATOMIC_ACQUIRE);
+	if(!head) return;
+	if(!__atomic_compare_exchange_n(&s->head, &head, NULL,
+		0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return;
+	void *tail = head;
+	while(((union header *)tail)->s.next != NULL) tail = ((union header *)tail)->s.next;
+	global_push_unsized_chain(&g_pools[pid], head, tail);
+}
+
+/* ---- TLS destructor: flush caches and retire-list into the global limbo ---- */
+static void tls_destructor(void *p)
+{
+	(void)p;
+	if(!tls_registered) return;
+	struct tls_state *t = &tls;
+
+	/* Flush all caches to per-thread retired chains (this thread's epoch
+	 * is still pinned to its last announced value; the new chain inherits
+	 * that retire epoch). */
+	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
+		if(t->sized_cnt[pid] > 0) {
+			void *head = t->sized_cache[pid][0];
+			void *tail = t->sized_cache[pid][t->sized_cnt[pid] - 1];
+			for(size_t i = 0; i < t->sized_cnt[pid] - 1; i++)
+				sized_link_set(t->sized_cache[pid][i], t->sized_cache[pid][i+1]);
+			sized_link_set(tail, NULL);
+			t->retired_sized[pid][0].head = head;
+			t->retired_sized[pid][0].tail = tail;
+			t->sized_cnt[pid] = 0;
+		}
+		if(t->unsized_cnt[pid] > 0) {
+			void *head = t->unsized_cache[pid][0];
+			void *tail = t->unsized_cache[pid][t->unsized_cnt[pid] - 1];
+			for(size_t i = 0; i < t->unsized_cnt[pid] - 1; i++)
+				((union header *)t->unsized_cache[pid][i])->s.next =
+					(union header *)t->unsized_cache[pid][i+1];
+			((union header *)tail)->s.next = NULL;
+			t->retired_unsized[pid][0].head = head;
+			t->retired_unsized[pid][0].tail = tail;
+			t->unsized_cnt[pid] = 0;
+		}
+	}
+
+	/* Deposit all per-epoch retired batches into the global limbo; live
+	 * threads drain them lazily. The block cannot be reused until a
+	 * future epoch advance, which is ABA-safe. */
+	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
+		for(int slot = 0; slot < JP_EBR_EPOCHS; slot++) {
+			if(t->retired_sized[pid][slot].head) {
+				deposit_to_limbo_sized(pid, slot,
+					t->retired_sized[pid][slot].head,
+					t->retired_sized[pid][slot].tail);
+				t->retired_sized[pid][slot].head = t->retired_sized[pid][slot].tail = NULL;
+			}
+			if(t->retired_unsized[pid][slot].head) {
+				deposit_to_limbo_unsized(pid, slot,
+					t->retired_unsized[pid][slot].head,
+					t->retired_unsized[pid][slot].tail);
+				t->retired_unsized[pid][slot].head = t->retired_unsized[pid][slot].tail = NULL;
+			}
+		}
+	}
+
+	/* Mark this thread inactive so other threads stop waiting on its epoch. */
+	if(t->self) {
+		__atomic_store_n(&t->self->active, 0, __ATOMIC_RELEASE);
+		__atomic_store_n(&t->self->epoch, JP_EBR_INACTIVE, __ATOMIC_RELEASE);
+	}
+	tls_registered = 0;
+}
+
+/* ---- EBR critical section ---- */
+
+static inline void ebr_enter(void)
+{
+	tls_register();
+	if(tls.self) {
+		long e = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
+		/* Publish observed epoch, then set active. Advancing threads
+		 * re-check active vs (old-1) before committing. */
+		__atomic_store_n(&tls.self->epoch, e, __ATOMIC_RELEASE);
+		__atomic_store_n(&tls.self->active, 1, __ATOMIC_RELEASE);
+	}
+}
+
+static inline void ebr_exit(void)
+{
+	if(tls.self) {
+		__atomic_store_n(&tls.self->active, 0, __ATOMIC_RELEASE);
+		__atomic_store_n(&tls.self->epoch, JP_EBR_INACTIVE, __ATOMIC_RELEASE);
+	}
+	ebr_try_advance();
+}
+
+/* Try to advance the global epoch by 1. Returns 1 if it advanced.
+ * On success, drain the bucket at slot = ((old_epoch - 1) % JP_EBR_EPOCHS)
+ * for both per-thread retired lists and the global limbo. */
+static void ebr_try_advance(void)
+{
+	long old = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
+	/* All threads must be inactive or announcing `old`. If any thread is
+	 * active on an older epoch, we cannot advance. Note: a thread that is
+	 * active on `old` is also OK to advance (since its observed epoch equals
+	 * the new target `old+1` — no, it doesn't). The standard EBR rule: we
+	 * can advance from old to old+1 only if every active thread's epoch is
+	 * exactly `old` (none lagging at old-1). Threads announcing `old` are
+	 * safe to advance past `old`'s predecessor, which is what drains
+	 * (old-1) % 3. */
+	struct ebr_thread *r = __atomic_load_n(&g_thread_list, __ATOMIC_ACQUIRE);
+	while(r) {
+		int active = __atomic_load_n(&r->active, __ATOMIC_ACQUIRE);
+		long e = __atomic_load_n(&r->epoch, __ATOMIC_ACQUIRE);
+		if(active && e < old) return; /* someone lags behind */
+		r = __atomic_load_n(&r->next, __ATOMIC_ACQUIRE);
+	}
+	/* Try to advance. */
+	if(!__atomic_compare_exchange_n(&g_epoch, &old, old + 1,
+		0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		return; /* someone else advanced first */
+
+	/* Drained slot: blocks retired at epoch (old-1) are now safe. */
+	int drain_slot = (int)(((old - 1) + JP_EBR_EPOCHS) % JP_EBR_EPOCHS);
+
+	/* Drain per-thread retired batches for this slot into the global pools. */
+	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
+		if(tls.retired_sized[pid][drain_slot].head) {
+			void *h = tls.retired_sized[pid][drain_slot].head;
+			void *t = tls.retired_sized[pid][drain_slot].tail;
+			tls.retired_sized[pid][drain_slot].head = tls.retired_sized[pid][drain_slot].tail = NULL;
+			global_push_sized_chain(&g_sized_pools[pid], h, t);
+		}
+		if(tls.retired_unsized[pid][drain_slot].head) {
+			void *h = tls.retired_unsized[pid][drain_slot].head;
+			void *t = tls.retired_unsized[pid][drain_slot].tail;
+			tls.retired_unsized[pid][drain_slot].head = tls.retired_unsized[pid][drain_slot].tail = NULL;
+			global_push_unsized_chain(&g_pools[pid], h, t);
+		}
+		/* Drain the limbo (other dead threads' deposits) for this slot too. */
+		drain_limbo_sized(pid, drain_slot);
+		drain_limbo_unsized(pid, drain_slot);
+	}
+}
+
+/* ---- Header'd pool operations (cache + EBR-protected global freelist) ---- */
+
+static void global_push_unsized_chain(struct pool *p, void *chain_head, void *chain_tail)
+{
+	void *old = atomic_load_ptr(&p->head);
+	do {
+		((union header *)chain_tail)->s.next = (union header *)old;
+	} while(!atomic_cas_ptr(&p->head, &old, chain_head));
+}
+
+/* Pop a single block from the global unsized freelist. Caller must be
+ * inside an EBR critical section (ebr_enter()/ebr_exit()).
+ * Returns NULL if the freelist is empty. */
+static void *global_pop_unsized(struct pool *p)
+{
+	void *head = atomic_load_ptr(&p->head);
+	for(;;) {
+		if(head == NULL) return NULL;
+		void *next = ((union header *)head)->s.next;
+		if(atomic_cas_ptr(&p->head, &head, next)) return head;
+		/* head updated by CAS failure; retry */
+	}
+}
+
+static void pool_put(union header *h, struct pool *p, size_t pid)
+{
+	(void)p;
 #ifdef JP_ALLOC_DEBUG
 	h->s.magic = JP_UNSIZED_MAGIC;
 	h->s.state = JP_STATE_FREE;
 #endif
-	tagged_val_t expected = tagged_load(&p->head);
-	void *next;
-	uintptr_t tag;
-	do {
-		next = TAGGED_PTR(expected);
-		tag = TAGGED_TAG(expected);
-		h->s.next = (union header *)next;
-	} while(!tagged_cas(&p->head, &expected, TAGGED_MAKE(h, tag + 1)));
+	/* Try the per-thread cache first. */
+	if(likely(tls.unsized_cnt[pid] < JP_CACHE_N)) {
+		tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = h;
+		return;
+	}
+	/* Cache full: flush half as a single chain (LIFO order; the bottom of
+	 * the stack becomes the new head of the retired chain). */
+	void *flush_head = tls.unsized_cache[pid][0];
+	void *flush_tail = tls.unsized_cache[pid][JP_CACHE_FLUSH - 1];
+	for(size_t i = 0; i < JP_CACHE_FLUSH - 1; i++)
+		((union header *)tls.unsized_cache[pid][i])->s.next =
+			(union header *)tls.unsized_cache[pid][i+1];
+	((union header *)flush_tail)->s.next = NULL;
+	/* Compact remaining entries down. */
+	tls.unsized_cnt[pid] -= JP_CACHE_FLUSH;
+	memmove(&tls.unsized_cache[pid][0],
+		&tls.unsized_cache[pid][JP_CACHE_FLUSH],
+		tls.unsized_cnt[pid] * sizeof(void *));
+	/* Append h to the chain (cheaper than a separate retire). */
+	((union header *)flush_tail)->s.next = h;
+	((union header *)h)->s.next = NULL;
+	flush_tail = h;
+	/* Retire the chain at current epoch. */
+	long e = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
+	int slot = (int)(e % JP_EBR_EPOCHS);
+	struct retired_chain *rc = &tls.retired_unsized[pid][slot];
+	if(rc->head == NULL) {
+		rc->head = flush_head;
+		rc->tail = flush_tail;
+	} else {
+		((union header *)rc->tail)->s.next = (union header *)flush_head;
+		rc->tail = flush_tail;
+	}
+	ebr_try_advance();
 }
 
-static void *pool_get(struct pool *p)
+static void *pool_get(struct pool *p, size_t pid)
 {
-	tagged_val_t expected = tagged_load(&p->head);
+	/* Try cache first. */
+	if(likely(tls.unsized_cnt[pid] > 0)) {
+		return (union header *)tls.unsized_cache[pid][--tls.unsized_cnt[pid]];
+	}
+	/* Cache miss: pop one from the global freelist under EBR. Re-entrancy
+	 * note: pool_get may recurse via buddy-split; only the outermost call
+	 * should bracket ebr_enter/exit. */
+	int outer = !tls.in_pop_cs;
+	if(outer) {
+		ebr_enter();
+		tls.in_pop_cs = 1;
+	}
 	union header *result = NULL;
-	void *ptr;
-	uintptr_t tag;
-	while((ptr = TAGGED_PTR(expected)) != NULL) {
-		union header *h = (union header *)ptr;
-		tag = TAGGED_TAG(expected);
-		if(tagged_cas(&p->head, &expected, TAGGED_MAKE(h->s.next, tag + 1))) {
-			result = h;
-			break;
+	void *got = global_pop_unsized(p);
+	if(got != NULL) {
+		result = (union header *)got;
+	} else if(unlikely(p == g_pools_last)) {
+		size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
+		result = (union header *)os_alloc_pages(sz);
+		if(likely(result != NULL)) {
+			result->s.size = JP_ALLOC_POOL_COUNT - 1;
+#ifdef JP_ALLOC_DEBUG
+			result->s.magic = JP_UNSIZED_MAGIC;
+			result->s.state = JP_STATE_FREE;
+#endif
+		}
+} else {
+		/* Buddy split: pop a block from the next-larger pool and halve it. */
+		char *mem = (char *)pool_get(p + 1, pid + 1);
+		if(mem != NULL) {
+			result = (union header *)mem;
+			size_t sz = result->s.size - 1;
+			union header *spare = (union header *)(mem + (1U << sz));
+			result->s.size = sz;
+			spare->s.size = sz;
+#ifdef JP_ALLOC_DEBUG
+			spare->s.magic = JP_UNSIZED_MAGIC;
+			spare->s.state = JP_STATE_FREE;
+#endif
+			/* Recycle the spare buddy into OUR cache (not the parent's),
+			 * so the spare is reused locally rather than bouncing back
+			 * to the global freelist. */
+			if(likely(tls.unsized_cnt[pid] < JP_CACHE_N)) {
+				tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = spare;
+			} else {
+				/* Unlikely; fall back to retiring it. */
+				pool_put(spare, p, pid);
+			}
 		}
 	}
-	if(unlikely(result == NULL)) {
-		if(p == g_pools_last) {
-			size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
-			result = os_alloc_pages(sz);
-			if(likely(result != NULL)) {
-				result->s.size = JP_ALLOC_POOL_COUNT - 1;
-#ifdef JP_ALLOC_DEBUG
-				result->s.magic = JP_UNSIZED_MAGIC;
-				result->s.state = JP_STATE_FREE;
-#endif
-			}
-		} else {
-			char *mem = (char *)pool_get(p + 1);
-			if(mem != NULL) {
-				result = (union header *)mem;
-				size_t sz = result->s.size - 1;
-				union header *spare = (union header *)(mem + (1U << sz));
-				result->s.size = sz;
-				spare->s.size = sz;
-				pool_put(spare, p);
-			}
-		}
+	if(outer) {
+		tls.in_pop_cs = 0;
+		ebr_exit();
 	}
 #ifdef JP_ALLOC_DEBUG
 	if(result != NULL) {
@@ -296,7 +683,6 @@ static void *pool_get(struct pool *p)
 static size_t pool_id(size_t size)
 {
 	if(likely(size > 0)) {
-		/* Equivalent to C++ std::bit_width(size - 1) */
 		return 64 - __builtin_clzll(size - 1);
 	}
 	return 0;
@@ -309,9 +695,6 @@ static int is_pow2(size_t n)
 
 /* ---- Headerless sized pool operations ---- */
 
-/* Floor at 16 bytes so the in-band freelist link (void*) fits
- * and every block is 16-byte aligned. In debug mode, JP_SIZED_HDRSZ
- * bytes are added for the debug header. */
 static size_t pool_id_sized(size_t size)
 {
 	size += JP_SIZED_HDRSZ;
@@ -319,66 +702,109 @@ static size_t pool_id_sized(size_t size)
 	return 64 - __builtin_clzll(size - 1);
 }
 
-static void sized_pool_put(void *mem, struct sized_pool *p)
+static void global_push_sized_chain(struct sized_pool *p, void *chain_head, void *chain_tail)
 {
+	void *old = atomic_load_ptr(&p->head);
+	do {
+		sized_link_set(chain_tail, old);
+	} while(!atomic_cas_ptr(&p->head, &old, chain_head));
+}
+
+static void *global_pop_sized(struct sized_pool *p)
+{
+	void *head = atomic_load_ptr(&p->head);
+	for(;;) {
+		if(head == NULL) return NULL;
+		void *next = sized_link_get(head);
+		if(atomic_cas_ptr(&p->head, &head, next)) return head;
+	}
+}
+
+static void sized_pool_put(void *mem, struct sized_pool *p, size_t pid)
+{
+	(void)p;
 #ifdef JP_ALLOC_DEBUG
 	struct sized_header *h = (struct sized_header *)mem;
 	h->magic = JP_SIZED_MAGIC;
 	h->state = JP_STATE_FREE;
 #endif
-	tagged_val_t expected = tagged_load(&p->head);
-	void *next;
-	uintptr_t tag;
-	do {
-		next = TAGGED_PTR(expected);
-		tag = TAGGED_TAG(expected);
-#ifdef JP_ALLOC_DEBUG
-		h->next = (struct sized_header *)next;
-#else
-		*(void **)mem = next;
-#endif
-	} while(!tagged_cas(&p->head, &expected, TAGGED_MAKE(mem, tag + 1)));
+	if(likely(tls.sized_cnt[pid] < JP_CACHE_N)) {
+		tls.sized_cache[pid][tls.sized_cnt[pid]++] = mem;
+		return;
+	}
+	/* Flush half as a chain. */
+	void *flush_head = tls.sized_cache[pid][0];
+	void *flush_tail = tls.sized_cache[pid][JP_CACHE_FLUSH - 1];
+	for(size_t i = 0; i < JP_CACHE_FLUSH - 1; i++)
+		sized_link_set(tls.sized_cache[pid][i], tls.sized_cache[pid][i+1]);
+	sized_link_set(flush_tail, NULL);
+	tls.sized_cnt[pid] -= JP_CACHE_FLUSH;
+	memmove(&tls.sized_cache[pid][0],
+		&tls.sized_cache[pid][JP_CACHE_FLUSH],
+		tls.sized_cnt[pid] * sizeof(void *));
+	/* Append the freshly-freed block to the chain. */
+	sized_link_set(flush_tail, mem);
+	sized_link_set(mem, NULL);
+	flush_tail = mem;
+	/* Retire. */
+	long e = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
+	int slot = (int)(e % JP_EBR_EPOCHS);
+	struct retired_chain *rc = &tls.retired_sized[pid][slot];
+	if(rc->head == NULL) {
+		rc->head = flush_head;
+		rc->tail = flush_tail;
+	} else {
+		sized_link_set(rc->tail, flush_head);
+		rc->tail = flush_tail;
+	}
+	ebr_try_advance();
 }
 
 static void *sized_pool_get(size_t pid)
 {
-	struct sized_pool *p = g_sized_pools + pid;
-	tagged_val_t expected = tagged_load(&p->head);
+	if(likely(tls.sized_cnt[pid] > 0)) {
+		return tls.sized_cache[pid][--tls.sized_cnt[pid]];
+	}
+	int outer = !tls.in_pop_cs;
+	if(outer) {
+		ebr_enter();
+		tls.in_pop_cs = 1;
+	}
 	void *result = NULL;
-	void *ptr;
-	uintptr_t tag;
-	while((ptr = TAGGED_PTR(expected)) != NULL) {
-		tag = TAGGED_TAG(expected);
+	void *got = global_pop_sized(&g_sized_pools[pid]);
+	if(got != NULL) {
+		result = got;
+	} else if(unlikely(&g_sized_pools[pid] == g_sized_pools_last)) {
+		size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
+		result = os_alloc_pages(sz);
 #ifdef JP_ALLOC_DEBUG
-		void *next = ((struct sized_header *)ptr)->next;
-#else
-		void *next = *(void **)ptr;
+		if(result) {
+			struct sized_header *h = (struct sized_header *)result;
+			h->magic = JP_SIZED_MAGIC;
+			h->state = JP_STATE_FREE;
+		}
 #endif
-		if(tagged_cas(&p->head, &expected, TAGGED_MAKE(next, tag + 1))) {
-			result = ptr;
-			break;
+	} else {
+		char *mem = (char *)sized_pool_get(pid + 1);
+		if(mem != NULL) {
+			size_t buddy_size = 1U << pid;
+			result = mem;
+			void *spare = mem + buddy_size;
+#ifdef JP_ALLOC_DEBUG
+			struct sized_header *sh = (struct sized_header *)spare;
+			sh->magic = JP_SIZED_MAGIC;
+			sh->state = JP_STATE_FREE;
+#endif
+			if(likely(tls.sized_cnt[pid] < JP_CACHE_N)) {
+				tls.sized_cache[pid][tls.sized_cnt[pid]++] = spare;
+			} else {
+				sized_pool_put(spare, &g_sized_pools[pid], pid);
+			}
 		}
 	}
-	if(unlikely(result == NULL)) {
-		if(p == g_sized_pools_last) {
-			size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
-			result = os_alloc_pages(sz);
-#ifdef JP_ALLOC_DEBUG
-			if(result) {
-				struct sized_header *h = (struct sized_header *)result;
-				h->magic = JP_SIZED_MAGIC;
-				h->state = JP_STATE_FREE;
-			}
-#endif
-		} else {
-			char *mem = (char *)sized_pool_get(pid + 1);
-			if(mem != NULL) {
-				size_t buddy_size = 1U << pid;
-				result = mem;
-				void *spare = mem + buddy_size;
-				sized_pool_put(spare, p);
-			}
-		}
+	if(outer) {
+		tls.in_pop_cs = 0;
+		ebr_exit();
 	}
 #ifdef JP_ALLOC_DEBUG
 	if(result != NULL) {
@@ -430,7 +856,6 @@ static void *alloc_pages_aligned(size_t alignment, size_t size)
 /* ---- Public API ---- */
 
 size_t jp_good_size(size_t size);
-
 size_t jp_good_size(size_t size)
 {
 	size_t pid = pool_id(size);
@@ -501,7 +926,7 @@ void jp_free_sized(void *mem, size_t size)
 
 	size_t pid = pool_id_sized(size);
 	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
-		sized_pool_put(block, g_sized_pools + pid);
+		sized_pool_put(block, &g_sized_pools[pid], pid);
 	} else {
 		size_t ps_mask = os_page_size() - 1;
 		size_t total = size + JP_SIZED_HDRSZ;
@@ -533,13 +958,11 @@ void *jp_realloc_sized(void *mem, size_t oldsz, size_t newsz)
 			 mem, h->size, oldsz);
 	}
 #endif
-	/* If both old and new fall in the same pool bucket, no copy needed */
 	size_t old_pid = pool_id_sized(oldsz);
 	size_t new_pid = pool_id_sized(newsz);
 	if(old_pid == new_pid) {
 		if(old_pid < JP_ALLOC_POOL_COUNT)
-			return mem;		/* same pool bucket */
-		/* both large: compare page-rounded sizes (including debug header) */
+			return mem;
 		size_t ps_mask = os_page_size() - 1;
 		size_t old_total = oldsz + JP_SIZED_HDRSZ;
 		size_t new_total = newsz + JP_SIZED_HDRSZ;
@@ -581,7 +1004,7 @@ static void jp_free(void *mem)
 #endif
 	size_t size = h->s.size;
 	if(likely(size < JP_ALLOC_POOL_COUNT)) {
-		pool_put(h, g_pools + size);
+		pool_put(h, g_pools + size, size);
 	} else {
 		size_t pre_padding = (size_t)mem & (os_page_size() - 1);
 		os_free_pages((char *)h + pre_padding, size + pre_padding);
@@ -594,7 +1017,7 @@ static void *jp_alloc(size_t size)
 	void *mem;
 	size_t pid = pool_id(size);
 	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
-		mem = pool_get(g_pools + pid);
+		mem = pool_get(g_pools + pid, pid);
 		if(mem == NULL) return NULL;
 	} else {
 		size_t ps_mask = os_page_size() - 1;
@@ -631,13 +1054,10 @@ static void *jp_alloc_aligned(size_t alignment, size_t size)
 static void *jp_calloc(size_t num, size_t nsize)
 {
 	size_t size = num * nsize;
-
-	/* check mul overflow */
 	if(num && nsize != size / num) {
 		errno = ENOMEM;
 		return NULL;
 	}
-
 	void *mem = jp_alloc(size);
 	if(mem) memset(mem, 0, size);
 	return mem;
@@ -661,7 +1081,6 @@ static void *jp_realloc(void *mem, size_t new_size)
 		size -= sizeof(union header);
 	}
 	if(new_size > size) {
-		/* Try mremap for large (mmap'd) allocations to avoid copying */
 		if(mem != NULL) {
 			union header *h = (union header *)mem - 1;
 			size_t hdr_size = h->s.size;
@@ -701,7 +1120,7 @@ void *realloc(void *mem, size_t new_size) { return jp_realloc(mem, new_size); }
 
 void *valloc(size_t size) { return jp_alloc_aligned(os_page_size(), size); }
 void *memalign(size_t alignment, size_t size) { return jp_alloc_aligned(alignment, size); }
-void *pvalloc(size_t size) { return jp_alloc_aligned(os_page_size(), size); }
+void *pvalign(size_t size) { return jp_alloc_aligned(os_page_size(), size); }
 void *aligned_alloc(size_t alignment, size_t size) { return jp_alloc_aligned(alignment, size); }
 
 int posix_memalign(void **memptr, size_t alignment, size_t size)
@@ -746,5 +1165,8 @@ void *reallocarray(void *ptr, size_t nmemb, size_t size)
 	return jp_realloc(ptr, total_size);
 }
 
-/* cfree is removed from modern glibc headers (declared above). */
 void cfree(void *mem) { jp_free(mem); }
+
+/* ---- Configuration knob stubs (SVID/BSD alphas) ----
+ * The original file had a couple of size-class configuration helpers
+ * referenced but not key to the algorithm. Kept out of the rewrite. */

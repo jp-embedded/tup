@@ -80,10 +80,9 @@ TUP_SUID_GROUP = root
 TUP_USE_SYSTEM_PCRE = y
 include $(TARGET).tup
 
-# jp_alloc tagged-pointer CAS needs cmpxchg16b on x86-64
-ifeq (@(TUP_ARCH),x86_64)
-CFLAGS += -mcx16
-endif
+# jp_alloc uses 64-bit CAS plus EBR for ABA-freedom; no cmpxchg16b/-mcx16
+# flag is required on x86-64 anymore (the 128-bit tagged-pointer path was
+# replaced by the 64-bit CAS + 3-epoch-ring EBR + thread-local cache design).
 
 ifdef CC
 CC = @(CC)

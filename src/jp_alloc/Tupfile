@@ -1,2 +1,5 @@
 include_rules
-: foreach *.c |> !cc |> %B.o
+# Only compile the allocator itself into the tup binary. The benchmark/test
+# program (jp_alloc_bench.c) is built standalone by test/t5800-jp-alloc-threads.sh
+# with -DJP_ALLOC_BENCH so it provides its own main().
+: foreach jp_alloc.c |> !cc |> %B.o
