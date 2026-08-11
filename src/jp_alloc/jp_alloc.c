@@ -50,6 +50,23 @@
 #include <pthread.h>
 #endif
 
+/* ---- Cache hit/miss instrumentation ----
+ *
+ * Counted only when JP_ALLOC_DEBUG is defined so release builds pay zero
+ * cost. jp_alloc_stats() is always present (declared in the header) but in
+ * a release build it always returns zeros — the increment sites compile
+ * out via the JP_COUNT_HIT / JP_COUNT_MISS macros below. */
+static _Atomic(size_t) g_cache_hits;
+static _Atomic(size_t) g_cache_misses;
+
+#ifdef JP_ALLOC_DEBUG
+#define JP_COUNT_HIT   do { __atomic_add_fetch(&g_cache_hits,   1, __ATOMIC_RELAXED); } while(0)
+#define JP_COUNT_MISS  do { __atomic_add_fetch(&g_cache_misses, 1, __ATOMIC_RELAXED); } while(0)
+#else
+#define JP_COUNT_HIT   ((void)0)
+#define JP_COUNT_MISS  ((void)0)
+#endif
+
 #ifdef __GNUC__
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
@@ -244,8 +261,12 @@ static _Atomic(struct ebr_thread *) g_thread_list = NULL;
  * A full cache flushes half (16) entries as a single chain to EBR retire,
  * amortizing the global CAS and epoch update to one per 16 frees.
  */
+#ifndef JP_CACHE_N
 #define JP_CACHE_N 32
+#endif
+#ifndef JP_CACHE_FLUSH
 #define JP_CACHE_FLUSH  (JP_CACHE_N / 2)
+#endif
 
 /* Per-pool retired batches for one epoch slot. */
 struct retired_chain {
@@ -613,11 +634,13 @@ static void *pool_get(struct pool *p, size_t pid)
 {
 	/* Try cache first. */
 	if(likely(tls.unsized_cnt[pid] > 0)) {
+		JP_COUNT_HIT;
 		return (union header *)tls.unsized_cache[pid][--tls.unsized_cnt[pid]];
 	}
 	/* Cache miss: pop one from the global freelist under EBR. Re-entrancy
 	 * note: pool_get may recurse via buddy-split; only the outermost call
 	 * should bracket ebr_enter/exit. */
+	JP_COUNT_MISS;
 	int outer = !tls.in_pop_cs;
 	if(outer) {
 		ebr_enter();
@@ -763,8 +786,10 @@ static void sized_pool_put(void *mem, struct sized_pool *p, size_t pid)
 static void *sized_pool_get(size_t pid)
 {
 	if(likely(tls.sized_cnt[pid] > 0)) {
+		JP_COUNT_HIT;
 		return tls.sized_cache[pid][--tls.sized_cnt[pid]];
 	}
+	JP_COUNT_MISS;
 	int outer = !tls.in_pop_cs;
 	if(outer) {
 		ebr_enter();
@@ -984,6 +1009,12 @@ void jp_alloc_reset(void)
 	 * pointers, so valgrind reports it as "still reachable" (not an
 	 * error). The OS reclaims all pages at process exit. This
 	 * replaces the old mempool_clear() call in tup_valgrind_cleanup(). */
+}
+
+void jp_alloc_stats(size_t *hits, size_t *misses)
+{
+	if(hits)   *hits   = __atomic_load_n(&g_cache_hits,   __ATOMIC_RELAXED);
+	if(misses) *misses = __atomic_load_n(&g_cache_misses, __ATOMIC_RELAXED);
 }
 
 /* Header'd API (for malloc/free override) */

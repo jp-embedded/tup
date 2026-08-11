@@ -47,6 +47,14 @@
 #define JPBENCH_SEED_DEFAULT 0xc0ffeeULL
 #endif
 
+/* Workload mode env JPBENCH_MODE:
+ *   balanced    (default): graph_burn allocs+frees together (current)
+ *   alloc-heavy: accumulate N_OUTSTANDING allocations before freeing any.
+ *                Drains caches, exercises EBR refill from global freelist
+ *                and exposes hit-rate as a function of N.
+ *   free-heavy:  not implemented in this round; reserved for future. */
+static int g_mode_alloc_heavy = 0;
+
 /* ---- Sizes mimicking tup's hot structures ----
  *
  * Derived from src/tup/{graph,entry,file,tent_tree,tent_list,tupid_list,
@@ -156,6 +164,48 @@ static void graph_burn(struct thread_state *t, uint64_t *rng)
 		jp_free_sized(nodes[i], SZ_NODE);
 }
 
+/* Alloc-heavy mode: accumulate N_OUTSTANDING allocations across iterations
+ * before freeing any, then free all. Stretches the cache so the working set
+ * exceeds N for several hundred iters at a time and exercises EBR refill.
+ *
+ * Each iteration allocates one new block. When the outstanding list is
+ * full (>= N_OUTSTANDING), free them all at once. This produces a strong
+ * sawtooth of (alloc-heavy / free-heavy) phases that grows the cache past
+ * N on the alloc side and drains it (and triggers EBR flushes) on the free.
+ *
+ * The cache hit rate as a function of N is meaningful here:
+ *   hit% ≈ 1 - (N_OUTSTANDING/2) / total_ops_at_that_phase *ория
+ * The smaller N is, the more the cache misses during the alloc phase;
+ * the larger N is, the more often the cache absorbs the burst and the
+ * more the free phase overflows the cache (triggering EBR retire + the
+ * memmove flush). So alloc-heavy exposes the throughput-vs-N trade-off
+ * the balanced bench hides. */
+#define AH_OUTSTANDING 4096   /* blocks per phase; > JP_CACHE_N to force misses */
+struct alloc_heavy_state {
+	void *ring[AH_OUTSTANDING];
+	size_t cnt;        /* current outstanding */
+};
+static __thread struct alloc_heavy_state ah_state;
+
+static void alloc_heavy_burn(struct thread_state *t, uint64_t *rng)
+{
+	(void)t; (void)rng;
+	if(ah_state.cnt >= AH_OUTSTANDING) {
+		/* Free phase: drain the whole outstanding set. */
+		for(size_t i = 0; i < ah_state.cnt; i++)
+			jp_free_sized(ah_state.ring[i], SZ_NODE);
+		ah_state.cnt = 0;
+	}
+	ah_state.ring[ah_state.cnt++] = jp_alloc_sized(SZ_NODE);
+}
+
+static void alloc_heavy_drain(void)
+{
+	for(size_t i = 0; i < ah_state.cnt; i++)
+		jp_free_sized(ah_state.ring[i], SZ_NODE);
+	ah_state.cnt = 0;
+}
+
 static void malloc_burn(struct thread_state *t, uint64_t *rng)
 {
 	(void)t;
@@ -196,7 +246,10 @@ static void *worker(void *arg)
 
 		double t0 = now_sec();
 		for(int burst = 0; burst < OPS_PER_BURST; burst++) {
-			graph_burn(t, &rng);
+			if(g_mode_alloc_heavy)
+				alloc_heavy_burn(t, &rng);
+			else
+				graph_burn(t, &rng);
 			t->ops_done++;
 			if(timed && now_sec() >= deadline) break;
 			if(!timed && t->ops_done >= ops_target) break;
@@ -218,6 +271,8 @@ static void *worker(void *arg)
 				t->hist[b]++;
 		}
 	}
+	/* Drain outstanding blocks (only alloc-heavy mode has any state). */
+	if(g_mode_alloc_heavy) alloc_heavy_drain();
 	return NULL;
 }
 
@@ -269,6 +324,10 @@ int main(int argc, char **argv)
 		g_ops_per_thread = strtol(e, NULL, 10);
 	if((e = getenv("JPBENCH_SEED")) != NULL)
 		g_seed = (uint64_t)strtoull(e, NULL, 0);
+	if((e = getenv("JPBENCH_MODE")) != NULL) {
+		if(strcmp(e, "alloc-heavy") == 0) g_mode_alloc_heavy = 1;
+		/* "balanced" or any other value: graph_burn (default) */
+	}
 	if((e = getenv("JPBENCH_SECONDS")) != NULL && *e) {
 		g_run_timed = 1;
 		g_deadline = now_sec() + atof(e);
@@ -276,8 +335,9 @@ int main(int argc, char **argv)
 
 	if(g_total_threads < 1) g_total_threads = 1;
 
-	printf("jp_alloc bench: threads=%ld ops/thread=%ld%s%s\n",
+	printf("jp_alloc bench: threads=%ld ops/thread=%ld mode=%s%s%s\n",
 		g_total_threads, g_ops_per_thread,
+		g_mode_alloc_heavy ? "alloc-heavy" : "balanced",
 		g_run_timed ? " timed=" : "",
 		g_run_timed ? getenv("JPBENCH_SECONDS") : "");
 #ifdef JP_ALLOC_DEBUG
@@ -399,6 +459,31 @@ int main(int argc, char **argv)
 		mean, stddev, gmin, gmax);
 	printf("latency p50/p99 : p50~=%.0f ns  p99~=%.0f ns\n", p50, p99);
 	printf("peak RSS        : %zu kB\n", peak_rss_kb());
+
+	/* Cache hit rate — only meaningful when JP_ALLOC_DEBUG is defined in
+	 * the linked jp_alloc.c (the counters compile out in release). When
+	 * the bench is built without jp_alloc.c (comparison-allocator mode),
+	 * jp_alloc_stats() also returns zeros; we distinguish the two cases
+	 * via the JP_ALLOC_COMPILED macro. */
+	{
+		size_t hits = 0, misses = 0;
+		jp_alloc_stats(&hits, &misses);
+#ifdef JP_ALLOC_COMPILED
+# ifdef JP_ALLOC_DEBUG
+		if(hits + misses > 0) {
+			double rate = 100.0 * (double)hits / (double)(hits + misses);
+			printf("cache hit rate  : %.1f%%  (hits=%zu  misses=%zu)\n",
+				rate, hits, misses);
+		} else {
+			printf("cache hit rate  : (no cache activity recorded)\n");
+		}
+# else
+		printf("cache hit rate  : (counters only in JP_ALLOC_DEBUG build)\n");
+# endif
+#else
+		printf("cache hit rate  : (no jp_alloc linked — comparison allocator)\n");
+#endif
+	}
 
 #ifdef JP_ALLOC_DEBUG
 	/* When run under JP_ALLOC_DEBUG the allocator aborts on the first ABA
