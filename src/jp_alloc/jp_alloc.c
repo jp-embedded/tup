@@ -82,7 +82,7 @@ static _Atomic(size_t) g_cache_misses;
 /* ---- Portability fallbacks ---- */
 
 #ifndef JP_ALLOC_POOL_COUNT
-#define JP_ALLOC_POOL_COUNT 17  /* Gives pools of 1 - 64K */
+#define JP_ALLOC_POOL_COUNT 20  /* Gives pools of 1 - 512K */
 #endif
 
 #ifndef JP_CACHELINE
@@ -239,6 +239,13 @@ struct pool {
 
 static _Alignas(JP_CACHELINE) struct pool g_pools[JP_ALLOC_POOL_COUNT];
 static struct pool *g_pools_last = g_pools + JP_ALLOC_POOL_COUNT - 1;
+
+/* Dynamic chunk growth: when the largest pool is empty, mmap a chunk
+ * of memory and carve it into buddy blocks. The chunk size grows by
+ * 25% each time the largest pool is re-drained (prev + prev/4), so
+ * the mmap count stays low without overshooting RSS. Self-limiting:
+ * growth stops when the working set stabilizes (pool stops draining). */
+static size_t g_chunk_sz = 0;
 
 /* ---- Epoch-Based Reclamation (3-epoch ring) ----
  *
@@ -609,15 +616,45 @@ static void *pool_get(struct pool *p, size_t pid)
 			}
 		}
 		if(result == NULL) {
-			if(unlikely(p == g_pools_last)) {
+if(unlikely(p == g_pools_last)) {
+				/* Largest pool is empty — mmap a chunk and carve it
+				 * into buddy blocks. The chunk size grows by 25%
+				 * each time this path is hit (prev + prev/4), so
+				 * the mmap count stays low without overshooting RSS.
+				 * One mmap populates many blocks, replacing the
+				 * old per-block mmap (one syscall per 64KB block). */
 				size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
-				result = (union header *)os_alloc_pages(sz);
-				if(likely(result != NULL)) {
+				size_t chunk = g_chunk_sz ? g_chunk_sz + g_chunk_sz / 4 : sz * 2;
+				/* Round chunk up to a multiple of sz for clean carving */
+				chunk = (chunk + sz - 1) & ~(sz - 1);
+				g_chunk_sz = chunk;
+				char *pages = (char *)os_alloc_pages(chunk);
+				if(likely(pages != NULL)) {
+					size_t nblocks = chunk / sz;
+					result = (union header *)pages;
 					result->s.size = JP_ALLOC_POOL_COUNT - 1;
-	#ifdef JP_ALLOC_DEBUG
+#ifdef JP_ALLOC_DEBUG
 					result->s.magic = JP_UNSIZED_MAGIC;
 					result->s.state = JP_STATE_FREE;
-	#endif
+#endif
+					/* Push spare blocks 1..nblocks-1 into the
+					 * largest pool as a chain (one CAS). */
+					if(nblocks > 1) {
+						union header *head = (union header *)(pages + sz);
+						union header *tail = head;
+						for(size_t i = 1; i < nblocks; i++) {
+							union header *b = (union header *)(pages + i * sz);
+							b->s.size = JP_ALLOC_POOL_COUNT - 1;
+#ifdef JP_ALLOC_DEBUG
+							b->s.magic = JP_UNSIZED_MAGIC;
+							b->s.state = JP_STATE_FREE;
+#endif
+							tail->s.next = b;
+							tail = b;
+						}
+						tail->s.next = NULL;
+						global_push_chain(p, head, tail);
+					}
 				}
 			} else {
 				/* Buddy split: pop a block from the next-larger pool and halve it. */
