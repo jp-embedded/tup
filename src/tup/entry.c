@@ -148,8 +148,12 @@ static int rm_entry(tupid_t tupid, int safe)
 	if(tent->parent) {
 		string_tree_rm(&tent->parent->entries, &tent->name);
 	}
-	if(tent->re) {
-		pcre2_code_free(tent->re);
+	if(tent->dt == exclusion_dt()) {
+		if(tent->re)
+			pcre2_code_free(tent->re);
+	} else {
+		free(tent->display);
+		free(tent->flags);
 	}
 	free_tent_tree(&tent->stickies);
 	free_tent_tree(&tent->group_stickies);
@@ -158,8 +162,6 @@ static int rm_entry(tupid_t tupid, int safe)
 		return -1;
 	}
 	free(tent->name.s);
-	free(tent->display);
-	free(tent->flags);
 	free(tent);
 	return 0;
 }
@@ -515,15 +517,13 @@ static struct tup_entry *new_entry(tupid_t tupid, tupid_t dt,
 	tent->refcount = 0;
 	if(set_string(&tent->name.s, &tent->name.len, name, len) < 0)
 		return NULL;
-	if(set_string(&tent->display, &tent->displaylen, display, displaylen) < 0)
-		return NULL;
-	if(set_string(&tent->flags, &tent->flagslen, flags, flagslen) < 0)
-		return NULL;
-	RB_INIT(&tent->entries);
-
 	if(tent->dt == exclusion_dt()) {
 		int error;
 		size_t erroffset;
+		tent->flags = NULL;
+		tent->flagslen = 0;
+		tent->display = NULL;
+		tent->displaylen = 0;
 		tent->re = pcre2_compile((PCRE2_SPTR)tent->name.s, PCRE2_ZERO_TERMINATED, 0, &error, &erroffset, NULL);
 		if(!tent->re) {
 			PCRE2_UCHAR buffer[256];
@@ -532,8 +532,13 @@ static struct tup_entry *new_entry(tupid_t tupid, tupid_t dt,
 			return NULL;
 		}
 	} else {
+		if(set_string(&tent->display, &tent->displaylen, display, displaylen) < 0)
+			return NULL;
+		if(set_string(&tent->flags, &tent->flagslen, flags, flagslen) < 0)
+			return NULL;
 		tent->re = NULL;
 	}
+	RB_INIT(&tent->entries);
 
 	if(tupid_tree_insert(&tup_root, &tent->tnode) < 0) {
 		fprintf(stderr, "tup error: Unable to insert node %lli into the tupid tree in new_entry\n", tent->tnode.tupid);
