@@ -219,10 +219,10 @@ struct sized_pool {
 	char _pad[56];
 };
 
-static struct pool g_pools[JP_ALLOC_POOL_COUNT];
+static _Alignas(64) struct pool g_pools[JP_ALLOC_POOL_COUNT];
 static struct pool *g_pools_last = g_pools + JP_ALLOC_POOL_COUNT - 1;
 
-static struct sized_pool g_sized_pools[JP_ALLOC_POOL_COUNT];
+static _Alignas(64) struct sized_pool g_sized_pools[JP_ALLOC_POOL_COUNT];
 static struct sized_pool *g_sized_pools_last = g_sized_pools + JP_ALLOC_POOL_COUNT - 1;
 
 /* ---- Epoch-Based Reclamation (3-epoch ring) ----
@@ -266,6 +266,12 @@ static _Atomic(struct ebr_thread *) g_thread_list = NULL;
 #endif
 #ifndef JP_CACHE_FLUSH
 #define JP_CACHE_FLUSH  (JP_CACHE_N / 2)
+#endif
+/* How many blocks to pop from the global freelist in one CAS when the TLS
+ * cache misses. Each refill is one CAS for up to JP_REFILL blocks, amortizing
+ * the global-freelist contention across ~JP_REFILL future cache-missed pops. */
+#ifndef JP_REFILL
+#define JP_REFILL 16
 #endif
 
 /* Per-pool retired batches for one epoch slot. */
@@ -340,9 +346,10 @@ static void global_push_unsized_chain(struct pool *p, void *chain_head, void *ch
 struct limbo_slot {
 	void * volatile head;
 	void * volatile tail;
+	char _pad[64 - 2 * sizeof(void *)];
 };
-static struct limbo_slot g_limbo_sized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
-static struct limbo_slot g_limbo_unsized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+static _Alignas(64) struct limbo_slot g_limbo_sized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+static _Alignas(64) struct limbo_slot g_limbo_unsized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
 
 /* Sized freelist link accessors — defined here (before any limbo/chain
  * walker uses them) so DEBUG and release share a single chain format.
@@ -531,8 +538,10 @@ static void ebr_try_advance(void)
 	struct ebr_thread *r = __atomic_load_n(&g_thread_list, __ATOMIC_ACQUIRE);
 	while(r) {
 		int active = __atomic_load_n(&r->active, __ATOMIC_ACQUIRE);
-		long e = __atomic_load_n(&r->epoch, __ATOMIC_ACQUIRE);
-		if(active && e < old) return; /* someone lags behind */
+		if(active) {
+			long e = __atomic_load_n(&r->epoch, __ATOMIC_ACQUIRE);
+			if(e < old) return; /* someone lags behind */
+		}
 		r = __atomic_load_n(&r->next, __ATOMIC_ACQUIRE);
 	}
 	/* Try to advance. */
@@ -571,20 +580,6 @@ static void global_push_unsized_chain(struct pool *p, void *chain_head, void *ch
 	do {
 		((union header *)chain_tail)->s.next = (union header *)old;
 	} while(!atomic_cas_ptr(&p->head, &old, chain_head));
-}
-
-/* Pop a single block from the global unsized freelist. Caller must be
- * inside an EBR critical section (ebr_enter()/ebr_exit()).
- * Returns NULL if the freelist is empty. */
-static void *global_pop_unsized(struct pool *p)
-{
-	void *head = atomic_load_ptr(&p->head);
-	for(;;) {
-		if(head == NULL) return NULL;
-		void *next = ((union header *)head)->s.next;
-		if(atomic_cas_ptr(&p->head, &head, next)) return head;
-		/* head updated by CAS failure; retry */
-	}
 }
 
 static void pool_put(union header *h, struct pool *p, size_t pid)
@@ -631,77 +626,118 @@ static void pool_put(union header *h, struct pool *p, size_t pid)
 }
 
 static void *pool_get(struct pool *p, size_t pid)
-{
-	/* Try cache first. */
-	if(likely(tls.unsized_cnt[pid] > 0)) {
-		JP_COUNT_HIT;
-		return (union header *)tls.unsized_cache[pid][--tls.unsized_cnt[pid]];
-	}
-	/* Cache miss: pop one from the global freelist under EBR. Re-entrancy
-	 * note: pool_get may recurse via buddy-split; only the outermost call
-	 * should bracket ebr_enter/exit. */
-	JP_COUNT_MISS;
-	int outer = !tls.in_pop_cs;
-	if(outer) {
-		ebr_enter();
-		tls.in_pop_cs = 1;
-	}
-	union header *result = NULL;
-	void *got = global_pop_unsized(p);
-	if(got != NULL) {
-		result = (union header *)got;
-	} else if(unlikely(p == g_pools_last)) {
-		size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
-		result = (union header *)os_alloc_pages(sz);
-		if(likely(result != NULL)) {
-			result->s.size = JP_ALLOC_POOL_COUNT - 1;
-#ifdef JP_ALLOC_DEBUG
-			result->s.magic = JP_UNSIZED_MAGIC;
-			result->s.state = JP_STATE_FREE;
-#endif
+	{
+		/* Try cache first. */
+		if(likely(tls.unsized_cnt[pid] > 0)) {
+			JP_COUNT_HIT;
+			return (union header *)tls.unsized_cache[pid][--tls.unsized_cnt[pid]];
 		}
-} else {
-		/* Buddy split: pop a block from the next-larger pool and halve it. */
-		char *mem = (char *)pool_get(p + 1, pid + 1);
-		if(mem != NULL) {
-			result = (union header *)mem;
-			size_t sz = result->s.size - 1;
-			union header *spare = (union header *)(mem + (1U << sz));
-			result->s.size = sz;
-			spare->s.size = sz;
-#ifdef JP_ALLOC_DEBUG
-			spare->s.magic = JP_UNSIZED_MAGIC;
-			spare->s.state = JP_STATE_FREE;
-#endif
-			/* Recycle the spare buddy into OUR cache (not the parent's),
-			 * so the spare is reused locally rather than bouncing back
-			 * to the global freelist. */
-			if(likely(tls.unsized_cnt[pid] < JP_CACHE_N)) {
-				tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = spare;
-			} else {
-				/* Unlikely; fall back to retiring it. */
-				pool_put(spare, p, pid);
+		/* Cache miss: batched refill from the global freelist under EBR.
+		 * Pop up to JP_REFILL blocks in one CAS — the first becomes the
+		 * result, the rest are installed into the TLS cache. Re-entrancy
+		 * note: pool_get may recurse via buddy-split; only the outermost
+		 * call should bracket ebr_enter/exit. */
+		JP_COUNT_MISS;
+		int outer = !tls.in_pop_cs;
+		if(outer) {
+			ebr_enter();
+			tls.in_pop_cs = 1;
+		}
+		union header *result = NULL;
+		{
+			void *head = atomic_load_ptr(&p->head);
+			for(;;) {
+				if(head == NULL) break;
+				/* Walk up to JP_REFILL links from the global freelist. */
+				void *tail = head; size_t n = 1;
+				while(n < JP_REFILL) {
+					void *next = ((union header *)tail)->s.next;
+					if(next == NULL) break;
+					tail = next; n++;
+				}
+				void *new_head;
+				if(n < JP_REFILL) {
+					/* tail is the end of the freelist (its next is NULL). */
+					new_head = NULL;
+				} else {
+					/* n == JP_REFILL; tail is the JP_REFILL-th block. */
+					new_head = ((union header *)tail)->s.next;
+				}
+				if(atomic_cas_ptr(&p->head, &head, new_head)) {
+					/* Won a chain of n blocks. Install n-1 into the cache
+					 * (limit to JP_CACHE_N-1 to leave room for the result). */
+					result = (union header *)head;
+					if(n > 1) {
+						void *cur = ((union header *)head)->s.next;
+						((union header *)tail)->s.next = NULL;
+						size_t install = n - 1;
+						if(install > JP_CACHE_N - 1) install = JP_CACHE_N - 1;
+						size_t i = 0;
+						while(i < install) {
+							tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = cur;
+							cur = ((union header *)cur)->s.next;
+							i++;
+						}
+					}
+					break;
+				}
+				/* CAS failed (head updated); retry with the new head. */
 			}
 		}
+		if(result == NULL) {
+			if(unlikely(p == g_pools_last)) {
+				size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
+				result = (union header *)os_alloc_pages(sz);
+				if(likely(result != NULL)) {
+					result->s.size = JP_ALLOC_POOL_COUNT - 1;
+	#ifdef JP_ALLOC_DEBUG
+					result->s.magic = JP_UNSIZED_MAGIC;
+					result->s.state = JP_STATE_FREE;
+	#endif
+				}
+			} else {
+				/* Buddy split: pop a block from the next-larger pool and halve it. */
+				char *mem = (char *)pool_get(p + 1, pid + 1);
+				if(mem != NULL) {
+					result = (union header *)mem;
+					size_t sz = result->s.size - 1;
+					union header *spare = (union header *)(mem + (1U << sz));
+					result->s.size = sz;
+					spare->s.size = sz;
+	#ifdef JP_ALLOC_DEBUG
+					spare->s.magic = JP_UNSIZED_MAGIC;
+					spare->s.state = JP_STATE_FREE;
+	#endif
+					/* Recycle the spare buddy into OUR cache (not the parent's),
+					 * so the spare is reused locally rather than bouncing back
+					 * to the global freelist. */
+					if(likely(tls.unsized_cnt[pid] < JP_CACHE_N)) {
+						tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = spare;
+					} else {
+						/* Unlikely; fall back to retiring it. */
+						pool_put(spare, p, pid);
+					}
+				}
+			}
+		}
+		if(outer) {
+			tls.in_pop_cs = 0;
+			ebr_exit();
+		}
+	#ifdef JP_ALLOC_DEBUG
+		if(result != NULL) {
+			JP_CHECK(result->s.magic == JP_UNSIZED_MAGIC,
+				 "pool_get: wrong magic %llx (expected %llx)\n",
+				 (unsigned long long)result->s.magic,
+				 (unsigned long long)JP_UNSIZED_MAGIC);
+			JP_CHECK(result->s.state == JP_STATE_FREE,
+				 "pool_get: ABA! block %p still LIVE (state=%llx)\n",
+				 (void *)result,
+				 (unsigned long long)result->s.state);
+		}
+	#endif
+		return result;
 	}
-	if(outer) {
-		tls.in_pop_cs = 0;
-		ebr_exit();
-	}
-#ifdef JP_ALLOC_DEBUG
-	if(result != NULL) {
-		JP_CHECK(result->s.magic == JP_UNSIZED_MAGIC,
-			 "pool_get: wrong magic %llx (expected %llx)\n",
-			 (unsigned long long)result->s.magic,
-			 (unsigned long long)JP_UNSIZED_MAGIC);
-		JP_CHECK(result->s.state == JP_STATE_FREE,
-			 "pool_get: ABA! block %p still LIVE (state=%llx)\n",
-			 (void *)result,
-			 (unsigned long long)result->s.state);
-	}
-#endif
-	return result;
-}
 
 static size_t pool_id(size_t size)
 {
@@ -731,16 +767,6 @@ static void global_push_sized_chain(struct sized_pool *p, void *chain_head, void
 	do {
 		sized_link_set(chain_tail, old);
 	} while(!atomic_cas_ptr(&p->head, &old, chain_head));
-}
-
-static void *global_pop_sized(struct sized_pool *p)
-{
-	void *head = atomic_load_ptr(&p->head);
-	for(;;) {
-		if(head == NULL) return NULL;
-		void *next = sized_link_get(head);
-		if(atomic_cas_ptr(&p->head, &head, next)) return head;
-	}
 }
 
 static void sized_pool_put(void *mem, struct sized_pool *p, size_t pid)
@@ -789,6 +815,7 @@ static void *sized_pool_get(size_t pid)
 		JP_COUNT_HIT;
 		return tls.sized_cache[pid][--tls.sized_cnt[pid]];
 	}
+	/* Cache miss: batched refill from global freelist under EBR. */
 	JP_COUNT_MISS;
 	int outer = !tls.in_pop_cs;
 	if(outer) {
@@ -796,34 +823,67 @@ static void *sized_pool_get(size_t pid)
 		tls.in_pop_cs = 1;
 	}
 	void *result = NULL;
-	void *got = global_pop_sized(&g_sized_pools[pid]);
-	if(got != NULL) {
-		result = got;
-	} else if(unlikely(&g_sized_pools[pid] == g_sized_pools_last)) {
-		size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
-		result = os_alloc_pages(sz);
-#ifdef JP_ALLOC_DEBUG
-		if(result) {
-			struct sized_header *h = (struct sized_header *)result;
-			h->magic = JP_SIZED_MAGIC;
-			h->state = JP_STATE_FREE;
-		}
-#endif
-	} else {
-		char *mem = (char *)sized_pool_get(pid + 1);
-		if(mem != NULL) {
-			size_t buddy_size = 1U << pid;
-			result = mem;
-			void *spare = mem + buddy_size;
-#ifdef JP_ALLOC_DEBUG
-			struct sized_header *sh = (struct sized_header *)spare;
-			sh->magic = JP_SIZED_MAGIC;
-			sh->state = JP_STATE_FREE;
-#endif
-			if(likely(tls.sized_cnt[pid] < JP_CACHE_N)) {
-				tls.sized_cache[pid][tls.sized_cnt[pid]++] = spare;
+	{
+		void *head = atomic_load_ptr(&g_sized_pools[pid].head);
+		for(;;) {
+			if(head == NULL) break;
+			void *tail = head; size_t n = 1;
+			while(n < JP_REFILL) {
+				void *next = sized_link_get(tail);
+				if(next == NULL) break;
+				tail = next; n++;
+			}
+			void *new_head;
+			if(n < JP_REFILL) {
+				new_head = NULL;
 			} else {
-				sized_pool_put(spare, &g_sized_pools[pid], pid);
+				new_head = sized_link_get(tail);
+			}
+			if(atomic_cas_ptr(&g_sized_pools[pid].head, &head, new_head)) {
+				result = head;
+				if(n > 1) {
+					void *cur = sized_link_get(head);
+					sized_link_set(tail, NULL);
+					size_t install = n - 1;
+					if(install > JP_CACHE_N - 1) install = JP_CACHE_N - 1;
+					size_t i = 0;
+					while(i < install) {
+						tls.sized_cache[pid][tls.sized_cnt[pid]++] = cur;
+						cur = sized_link_get(cur);
+						i++;
+					}
+				}
+				break;
+			}
+		}
+	}
+	if(result == NULL) {
+		if(unlikely(&g_sized_pools[pid] == g_sized_pools_last)) {
+			size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
+			result = os_alloc_pages(sz);
+#ifdef JP_ALLOC_DEBUG
+			if(result) {
+				struct sized_header *h = (struct sized_header *)result;
+				h->magic = JP_SIZED_MAGIC;
+				h->state = JP_STATE_FREE;
+			}
+#endif
+		} else {
+			char *mem = (char *)sized_pool_get(pid + 1);
+			if(mem != NULL) {
+				size_t buddy_size = 1U << pid;
+				result = mem;
+				void *spare = mem + buddy_size;
+#ifdef JP_ALLOC_DEBUG
+				struct sized_header *sh = (struct sized_header *)spare;
+				sh->magic = JP_SIZED_MAGIC;
+				sh->state = JP_STATE_FREE;
+#endif
+				if(likely(tls.sized_cnt[pid] < JP_CACHE_N)) {
+					tls.sized_cache[pid][tls.sized_cnt[pid]++] = spare;
+				} else {
+					sized_pool_put(spare, &g_sized_pools[pid], pid);
+				}
 			}
 		}
 	}
