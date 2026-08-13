@@ -19,7 +19,6 @@
  */
 
 #include "graph.h"
-#include "jp_alloc/jp_alloc.h"
 #include "entry.h"
 #include "debug.h"
 #include "fileio.h"
@@ -52,7 +51,7 @@ struct node *create_node(struct graph *g, struct tup_entry *tent)
 {
 	struct node *n;
 
-	n = jp_alloc_sized(sizeof *n);
+	n = malloc(sizeof *n);
 	if(!n) {
 		return NULL;
 	}
@@ -144,14 +143,14 @@ void remove_node(struct graph *g, struct node *n)
 		DEBUGP("Warning: Node %lli still has incoming edges.\n", n->tnode.tupid);
 	}
 	tupid_tree_rm(&g->node_root, &n->tnode);
-	jp_free_sized(n, sizeof *n);
+	free(n);
 }
 
 int create_edge(struct node *n1, struct node *n2, int style)
 {
 	struct edge *e;
 
-	e = jp_alloc_sized(sizeof *e);
+	e = malloc(sizeof *e);
 	if(!e) {
 		return -1;
 	}
@@ -172,7 +171,7 @@ static int create_edge_sorted(struct node *n1, struct node *n2, int style)
 	struct edge *e2;
 	struct edge *last;
 
-	e = jp_alloc_sized(sizeof *e);
+	e = malloc(sizeof *e);
 	if(!e) {
 		return -1;
 	}
@@ -214,7 +213,7 @@ void remove_edge(struct edge *e)
 {
 	LIST_REMOVE(e, list);
 	LIST_REMOVE(e, destlist);
-	jp_free_sized(e, sizeof *e);
+	free(e);
 }
 
 int create_graph(struct graph *g, enum TUP_NODE_TYPE count_flags)

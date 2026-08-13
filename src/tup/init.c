@@ -27,7 +27,6 @@
 #include "server.h"
 #include "option.h"
 #include "colors.h"
-#include "jp_alloc/jp_alloc.h"
 #include "privs.h"
 #include "variant.h"
 #include "version.h"
@@ -123,7 +122,6 @@ void tup_valgrind_cleanup(void)
 	if(getenv("TUP_VALGRIND")) {
 		tup_entry_clear();
 		variants_free();
-		jp_alloc_reset();
 
 		/* Also close out the standard file descriptors, so valgrind
 		 * doesn't complain about those as well. The outputs need to be

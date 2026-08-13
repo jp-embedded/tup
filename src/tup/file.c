@@ -20,7 +20,6 @@
 
 #define _ATFILE_SOURCE
 #include "file.h"
-#include "jp_alloc/jp_alloc.h"
 #include "debug.h"
 #include "db.h"
 #include "fileio.h"
@@ -547,7 +546,7 @@ static struct file_entry *new_entry(const char *filename)
 {
 	struct file_entry *fent;
 
-	fent = jp_alloc_sized(sizeof *fent);
+	fent = malloc(sizeof *fent);
 	if(!fent) {
 		return NULL;
 	}
@@ -555,7 +554,7 @@ static struct file_entry *new_entry(const char *filename)
 	fent->filename = strdup(filename);
 	if(!fent->filename) {
 		perror("strdup");
-		jp_free_sized(fent, sizeof *fent);
+		free(fent);
 		return NULL;
 	}
 	return fent;
@@ -565,7 +564,7 @@ void del_file_entry(struct file_entry_head *head, struct file_entry *fent)
 {
 	TAILQ_REMOVE(head, fent, list);
 	free(fent->filename);
-	jp_free_sized(fent, sizeof *fent);
+	free(fent);
 }
 
 int handle_rename(const char *from, const char *to, struct file_info *info)

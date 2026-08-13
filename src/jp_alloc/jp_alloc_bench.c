@@ -7,7 +7,7 @@
  *
  * The bench links jp_alloc.c so malloc/free are overridden globally; the
  * "unsized" malloc/free churn exercises the header'd pool path, while the
- * direct jp_alloc_sized/jp_free_sized calls exercise the headerless sized
+ * direct malloc/jp_free_sized calls exercise the headerless sized
  * path. 300 pthreads each run a fixed number of operations that mimic tup's
  * parse-graph workload, then the program prints ops/sec, per-thread p50/p99
  * latency, and peak RSS.
@@ -34,8 +34,10 @@
 #include <errno.h>
 #include <pthread.h>
 #include <math.h>
+#ifndef _WIN32
+#include <sys/resource.h>  /* getrusage for non-Linux peak RSS fallback */
+#endif
 
-#include "jp_alloc.h"
 
 #ifndef JPBENCH_THREADS_DEFAULT
 #define JPBENCH_THREADS_DEFAULT 300
@@ -143,12 +145,12 @@ static void graph_burn(struct thread_state *t, uint64_t *rng)
 	struct link *tent;
 	struct link *file;
 
-	tent = (struct link *)jp_alloc_sized(SZ_TENT);
-	file = (struct link *)jp_alloc_sized(SZ_FILE);
+	tent = (struct link *)malloc(SZ_TENT);
+	file = (struct link *)malloc(SZ_FILE);
 	for(int i = 0; i < NODES_PER_OP; i++)
-		nodes[i] = (struct link *)jp_alloc_sized(SZ_NODE);
+		nodes[i] = (struct link *)malloc(SZ_NODE);
 	for(int i = 0; i < EDGES_PER_OP; i++)
-		edges[i] = (struct link *)jp_alloc_sized(SZ_EDGE);
+		edges[i] = (struct link *)malloc(SZ_EDGE);
 
 	/* Touch the first byte of each block to force its first cache line
 	 * into L1, simulating the caller's first field write that real tup
@@ -169,12 +171,12 @@ static void graph_burn(struct thread_state *t, uint64_t *rng)
 	if(tent) tent->next = nodes[0];
 
 	/* tear down — interleave alloc/free like tup actually does */
-	jp_free_sized(tent, SZ_TENT);
-	jp_free_sized(file, SZ_FILE);
+	free(tent);
+	free(file);
 	for(int i = 0; i < EDGES_PER_OP; i++)
-		jp_free_sized(edges[i], SZ_EDGE);
+		free(edges[i]);
 	for(int i = 0; i < NODES_PER_OP; i++)
-		jp_free_sized(nodes[i], SZ_NODE);
+		free(nodes[i]);
 }
 
 /* Alloc-heavy mode: accumulate N_OUTSTANDING allocations across iterations
@@ -198,7 +200,7 @@ struct alloc_heavy_state {
 	void *ring[AH_OUTSTANDING];
 	size_t cnt;        /* current outstanding */
 };
-static __thread struct alloc_heavy_state ah_state;
+static _Thread_local struct alloc_heavy_state ah_state;
 
 static void alloc_heavy_burn(struct thread_state *t, uint64_t *rng)
 {
@@ -206,10 +208,10 @@ static void alloc_heavy_burn(struct thread_state *t, uint64_t *rng)
 	if(ah_state.cnt >= AH_OUTSTANDING) {
 		/* Free phase: drain the whole outstanding set. */
 		for(size_t i = 0; i < ah_state.cnt; i++)
-			jp_free_sized(ah_state.ring[i], SZ_NODE);
+			free(ah_state.ring[i]);
 		ah_state.cnt = 0;
 	}
-	ah_state.ring[ah_state.cnt++] = jp_alloc_sized(SZ_NODE);
+	ah_state.ring[ah_state.cnt++] = malloc(SZ_NODE);
 	if(ah_state.ring[ah_state.cnt - 1])
 		memset(ah_state.ring[ah_state.cnt - 1],0,SZ_NODE);
 }
@@ -217,7 +219,7 @@ static void alloc_heavy_burn(struct thread_state *t, uint64_t *rng)
 static void alloc_heavy_drain(void)
 {
 	for(size_t i = 0; i < ah_state.cnt; i++)
-		jp_free_sized(ah_state.ring[i], SZ_NODE);
+		free(ah_state.ring[i]);
 	ah_state.cnt = 0;
 }
 
@@ -376,8 +378,8 @@ int main(int argc, char **argv)
 	/* warm the global pools so the first batch doesn't include mmap latency */
 	{
 		void *warm[64];
-		for(int i = 0; i < 64; i++) warm[i] = jp_alloc_sized(SZ_NODE);
-		for(int i = 0; i < 64; i++) jp_free_sized(warm[i], SZ_NODE);
+		for(int i = 0; i < 64; i++) warm[i] = malloc(SZ_NODE);
+		for(int i = 0; i < 64; i++) free(warm[i]);
 	}
 
 	double t_start = now_sec();
@@ -475,31 +477,9 @@ int main(int argc, char **argv)
 	printf("latency p50/p99 : p50~=%.0f ns  p99~=%.0f ns\n", p50, p99);
 	printf("peak RSS        : %zu kB\n", peak_rss_kb());
 
-	/* Cache hit rate — only meaningful when JP_ALLOC_DEBUG is defined in
-	 * the linked jp_alloc.c (the counters compile out in release). In
-	 * comparison-allocator mode (no jp_alloc.c linked), jp_alloc_stats()
-	 * returns zeros via the inline stub. */
-	{
-		size_t hits = 0, misses = 0;
-		jp_alloc_stats(&hits, &misses);
-#ifdef JP_ALLOC_DEBUG
-		if(hits + misses > 0) {
-			double rate = 100.0 * (double)hits / (double)(hits + misses);
-			printf("cache hit rate  : %.1f%%  (hits=%zu  misses=%zu)\n",
-				rate, hits, misses);
-		} else {
-			printf("cache hit rate  : (no cache activity recorded)\n");
-		}
-#else
-		(void)hits; (void)misses;
-		printf("cache hit rate  : (counters only in JP_ALLOC_DEBUG build)\n");
-#endif
-	}
-
 #ifdef JP_ALLOC_DEBUG
 	/* When run under JP_ALLOC_DEBUG the allocator aborts on the first ABA
-	 * / double-free / wrong-API / size-mismatch event. Reaching here means
-	 * none fired. */
+	 * / double-free / corruption event. Reaching here means none fired. */
 	printf("ABA self-check  : no ABA / corruption detected\n");
 #endif
 	fflush(stdout);

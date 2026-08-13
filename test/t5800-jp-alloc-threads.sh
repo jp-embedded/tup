@@ -84,11 +84,11 @@ run_variant() {
 	rm -f "$binary" "$binary.log" "$binary.out"
 }
 
-# --- Variant 1: release (no JP_ALLOC_DEBUG; no -mcx16 needed) ---
+# --- Variant 1: release (no JP_ALLOC_DEBUG) ---
 run_variant "release" \
 	"jpbench_rel" \
 	-O2 -Wall -Wextra -Wno-unused-result \
-	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_BENCH -I"$PWD/../../src/jp_alloc" \
+	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_BENCH -I"$JPDIR" \
 	"$ALLOC_C" "$BENCH_C" \
 	-lpthread -lrt -lm
 
@@ -96,7 +96,7 @@ run_variant "release" \
 run_variant "debug-self-check" \
 	"jpbench_dbg" \
 	-O1 -g -Wall -Wextra -Wno-unused-result \
-	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_DEBUG -DJP_ALLOC_BENCH -I"$PWD/../../src/jp_alloc" \
+	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_DEBUG -DJP_ALLOC_BENCH -I"$JPDIR" \
 	"$ALLOC_C" "$BENCH_C" \
 	-lpthread -lrt -lm
 
@@ -108,7 +108,7 @@ OPS=10000
 run_variant "release-300-threads" \
 	"jpbench_300" \
 	-O2 -Wall -Wextra -Wno-unused-result \
-	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_BENCH -I"$PWD/../../src/jp_alloc" \
+	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_BENCH -I"$JPDIR" \
 	"$ALLOC_C" "$BENCH_C" \
 	-lpthread -lrt -lm
 THREADS=$prev_threads

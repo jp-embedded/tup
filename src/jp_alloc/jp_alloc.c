@@ -44,9 +44,8 @@
 #include <malloc.h>
 
 /* Define JP_ALLOC_IMPLEMENTATION before including the header so the real
- * (non-inline) declarations of jp_alloc_reset() and jp_alloc_stats() are
- * visible in this translation unit. This also silences
- * -Wmissing-prototypes for those entry points. */
+ * (non-inline) declaration of jp_alloc_reset() is visible in this
+ * translation unit. This also silences -Wmissing-prototypes. */
 #ifndef JP_ALLOC_IMPLEMENTATION
 #define JP_ALLOC_IMPLEMENTATION
 #endif
@@ -54,19 +53,17 @@
 
 #ifdef JP_ALLOC_DEBUG
 #include <stdio.h>
-#include <pthread.h>
 #endif
 
-/* ---- Cache hit/miss instrumentation ----
+/* ---- Cache hit/miss instrumentation (bench-only, compiled out in release)
+ * ----
  *
  * Counted only when JP_ALLOC_DEBUG is defined so release builds pay zero
- * cost. jp_alloc_stats() is always present (declared in the header) but in
- * a release build it always returns zeros — the increment sites compile
- * out via the JP_COUNT_HIT / JP_COUNT_MISS macros below. */
+ * cost. The bench declares these extern and reads them directly; the
+ * functions are not part of the public jp_alloc.h interface. */
+#ifdef JP_ALLOC_DEBUG
 static _Atomic(size_t) g_cache_hits;
 static _Atomic(size_t) g_cache_misses;
-
-#ifdef JP_ALLOC_DEBUG
 #define JP_COUNT_HIT   do { __atomic_add_fetch(&g_cache_hits,   1, __ATOMIC_RELAXED); } while(0)
 #define JP_COUNT_MISS  do { __atomic_add_fetch(&g_cache_misses, 1, __ATOMIC_RELAXED); } while(0)
 #else
@@ -82,8 +79,39 @@ static _Atomic(size_t) g_cache_misses;
 #define unlikely(x)     (x)
 #endif
 
+/* ---- Portability fallbacks ---- */
+
 #ifndef JP_ALLOC_POOL_COUNT
 #define JP_ALLOC_POOL_COUNT 17  /* Gives pools of 1 - 64K */
+#endif
+
+#ifndef JP_CACHELINE
+#define JP_CACHELINE 64
+#endif
+
+/* _Alignas / _Thread_local fallbacks for old compilers */
+#ifndef _Alignas
+#ifdef __GNUC__
+#define _Alignas(x) __attribute__((aligned(x)))
+#endif
+#endif
+#ifndef _Thread_local
+#ifdef __GNUC__
+#define _Thread_local __thread
+#endif
+#endif
+
+/* __builtin_clzll fallback for MSVC */
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline int jp_clzll(unsigned long long x)
+{
+	unsigned long r;
+	_BitScanReverse64(&r, x);
+	return 63 - (int)r;
+}
+#else
+#define jp_clzll(x) __builtin_clzll(x)
 #endif
 
 /* ---- Debug header (enabled by -DJP_ALLOC_DEBUG) ---- */
@@ -205,11 +233,11 @@ union header {
 };
 
 struct pool {
-	void * volatile head;        /* 64-bit atomic freelist head */
-	char _pad[56];               /* pad to a 64-byte cache line */
+	void * volatile head;        /* atomic freelist head */
+	char _pad[JP_CACHELINE - sizeof(void *)];  /* pad to one cache line */
 };
 
-static _Alignas(64) struct pool g_pools[JP_ALLOC_POOL_COUNT];
+static _Alignas(JP_CACHELINE) struct pool g_pools[JP_ALLOC_POOL_COUNT];
 static struct pool *g_pools_last = g_pools + JP_ALLOC_POOL_COUNT - 1;
 
 /* ---- Epoch-Based Reclamation (3-epoch ring) ----
@@ -327,10 +355,9 @@ static void global_push_chain(struct pool *p, void *chain_head, void *chain_tail
  * ebr_try_advance(). */
 struct limbo_slot {
 	void * volatile head;
-	void * volatile tail;
-	char _pad[64 - 2 * sizeof(void *)];
+	char _pad[JP_CACHELINE - sizeof(void *)];
 };
-static _Alignas(64) struct limbo_slot g_limbo[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+static _Alignas(JP_CACHELINE) struct limbo_slot g_limbo[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
 
 static void deposit_to_limbo(size_t pid, int slot, void *head, void *tail)
 {
@@ -339,16 +366,6 @@ static void deposit_to_limbo(size_t pid, int slot, void *head, void *tail)
 	for(;;) {
 		((union header *)tail)->s.next = (union header *)old_head;
 		if(atomic_cas_ptr(&s->head, &old_head, head)) break;
-	}
-	/* If we just set head from NULL, also publish tail for future mergers.
-	 * Other merging threads only swap head; tail is only needed during
-	 * drain (which walks the chain anyway), so we update tail only when the
-	 * chain was empty. */
-	if(old_head == NULL) {
-		/* best-effort: only the first merger of a NULL chain publishes a
-		 * tail; subsequent mergers will see non-NULL head and skip —
-		 * drainers walk to NULL anyway. */
-		__atomic_store_n(&s->tail, tail, __ATOMIC_RELEASE);
 	}
 }
 
@@ -649,7 +666,7 @@ static void *pool_get(struct pool *p, size_t pid)
 static size_t pool_id(size_t size)
 {
 	if(likely(size > 0)) {
-		return 64 - __builtin_clzll(size - 1);
+		return 64 - jp_clzll(size - 1);
 	}
 	return 0;
 }
@@ -714,15 +731,9 @@ void jp_alloc_reset(void)
 	 * replaces the old mempool_clear() call in tup_valgrind_cleanup(). */
 }
 
-void jp_alloc_stats(size_t *hits, size_t *misses)
-{
-	if(hits)   *hits   = __atomic_load_n(&g_cache_hits,   __ATOMIC_RELAXED);
-	if(misses) *misses = __atomic_load_n(&g_cache_misses, __ATOMIC_RELAXED);
-}
+/* ---- libc malloc/free/calloc/realloc overrides ---- */
 
-/* Header'd API (for malloc/free override) */
-
-static void jp_free(void *mem)
+void jp_free(void *mem)
 {
 	if(unlikely(mem == NULL)) return;
 
@@ -745,7 +756,7 @@ static void jp_free(void *mem)
 	}
 }
 
-static void *jp_alloc(size_t size)
+void *jp_alloc(size_t size)
 {
 	size += sizeof(union header);
 	void *mem;
@@ -771,7 +782,7 @@ static void *jp_alloc(size_t size)
 	return (union header *)mem + 1;
 }
 
-static void *jp_alloc_aligned(size_t alignment, size_t size)
+void *jp_alloc_aligned(size_t alignment, size_t size)
 {
 	size += sizeof(union header);
 	void *mem = alloc_pages_aligned(alignment, size);
@@ -785,7 +796,7 @@ static void *jp_alloc_aligned(size_t alignment, size_t size)
 	return (union header *)mem + 1;
 }
 
-static void *jp_calloc(size_t num, size_t nsize)
+void *jp_calloc(size_t num, size_t nsize)
 {
 	size_t size = num * nsize;
 	if(num && nsize != size / num) {
@@ -797,7 +808,7 @@ static void *jp_calloc(size_t num, size_t nsize)
 	return mem;
 }
 
-static void *jp_realloc(void *mem, size_t new_size)
+void *jp_realloc(void *mem, size_t new_size)
 {
 	size_t size = 0;
 	if(mem != NULL) {
@@ -865,22 +876,17 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
 	return 0;
 }
 
+/* ---- Platform-specific malloc extensions (gated per OS) ---- */
+
+#if defined(__GLIBC__) || defined(__linux__)
+
 size_t malloc_usable_size(void *ptr)
 {
 	union header *h = (union header *)ptr - 1;
 	size_t size = h->s.size;
-	if(size < JP_ALLOC_POOL_COUNT) size = 1U << size;
+	if(likely(size < JP_ALLOC_POOL_COUNT)) size = 1U << size;
 	return size - sizeof(union header);
 }
-
-/* BSD/macOS extensions not declared by glibc headers. Forward
- * declarations here silence -Wmissing-prototypes. */
-size_t malloc_size(void *ptr);
-size_t malloc_good_size(size_t size);
-void cfree(void *mem);
-
-size_t malloc_size(void *ptr) { return malloc_usable_size(ptr); }
-size_t malloc_good_size(size_t size) { return jp_good_size(size); }
 
 int mallopt(int param, int value)
 {
@@ -901,6 +907,11 @@ void *reallocarray(void *ptr, size_t nmemb, size_t size)
 
 void cfree(void *mem) { jp_free(mem); }
 
-/* ---- Configuration knob stubs (SVID/BSD alphas) ----
- * The original file had a couple of size-class configuration helpers
- * referenced but not key to the algorithm. Kept out of the rewrite. */
+#endif /* __GLIBC__ || __linux__ */
+
+#if defined(__APPLE__) || defined(__BSD__)
+
+size_t malloc_size(void *ptr) { return malloc_usable_size(ptr); }
+size_t malloc_good_size(size_t size) { return jp_good_size(size); }
+
+#endif /* __APPLE__ || __BSD__ */

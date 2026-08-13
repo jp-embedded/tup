@@ -20,7 +20,6 @@
 
 #define _ATFILE_SOURCE
 #include "entry.h"
-#include "jp_alloc/jp_alloc.h"
 #include "config.h"
 #include "db.h"
 #include "compat.h"
@@ -161,7 +160,7 @@ static int rm_entry(tupid_t tupid, int safe)
 	free(tent->name.s);
 	free(tent->display);
 	free(tent->flags);
-	jp_free_sized(tent, sizeof *tent);
+	free(tent);
 	return 0;
 }
 
@@ -482,7 +481,7 @@ static struct tup_entry *new_entry(tupid_t tupid, tupid_t dt,
 {
 	struct tup_entry *tent;
 
-	tent = jp_alloc_sized(sizeof *tent);
+	tent = malloc(sizeof *tent);
 	if(!tent) {
 		return NULL;
 	}
