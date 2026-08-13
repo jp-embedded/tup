@@ -68,8 +68,7 @@ esac
 use_jp_alloc=${TUP_USE_JP_ALLOC:-y}
 if [ "$use_jp_alloc" = "y" ]; then
 	plat_files="$plat_files ../src/jp_alloc/jp_alloc.c"
-	CFLAGS="$CFLAGS -DJP_ALLOC_COMPILED"
-	# jp_alloc now uses 64-bit CAS + EBR + thread-local cache; no -mcx16
+	# jp_alloc uses 64-bit CAS + EBR + thread-local cache; no -mcx16
 	# (the previous 128-bit tagged-pointer path has been removed).
 fi
 

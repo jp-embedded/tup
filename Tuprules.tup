@@ -49,9 +49,6 @@ TUP_USE_JP_ALLOC = @(TUP_USE_JP_ALLOC)
 ifeq ($(TUP_USE_JP_ALLOC),)
 TUP_USE_JP_ALLOC = y
 endif
-ifeq ($(TUP_USE_JP_ALLOC),y)
-CFLAGS += -DJP_ALLOC_COMPILED
-endif
 
 ifeq (@(TUP_32_BIT),y)
 CFLAGS += -m32

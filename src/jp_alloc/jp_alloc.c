@@ -5,9 +5,6 @@
  *
  * Modifications for tup:
  * - Converted from C++ to C11.
- * - Added headerless sized API (jp_alloc_sized/jp_free_sized/jp_realloc_sized)
- *   with in-band freelist links and a 16-byte pool floor, so callers that
- *   know the size at free time skip the per-block header entirely.
  * - Added jp_alloc_reset() for valgrind cleanup compatibility.
  * - Added Windows (VirtualAlloc) backend so jp_alloc works on all platforms.
  * - Added mremap for large reallocs on Linux.
@@ -24,6 +21,12 @@
  *   deposits each per-pool retired batch into a global limbo indexed by
  *   retire_epoch % 3, drained lazily by live threads during epoch advance;
  *   this keeps teardown ABA-safe and leak-free without per-thread locks.
+ * - Removed the headerless sized API (jp_alloc_sized/jp_free_sized/
+ *   jp_realloc_sized real definitions, struct sized_pool, g_sized_pools,
+ *   sized_link_get/set, g_limbo_sized, sized_pool_put/get, pool_id_sized,
+ *   JP_SIZED_MAGIC, struct sized_header, JP_SIZED_HDRSZ). All allocation now
+ *   goes through the single unified header'd malloc/free pool path; the sized
+ *   entry points remain in the header as inline libc wrappers only.
  */
 
 /* mremap is Linux-only and requires _GNU_SOURCE before includes */
@@ -40,9 +43,13 @@
 #include <stdlib.h>
 #include <malloc.h>
 
-/* Pull in prototypes for the sized API (JP_ALLOC_COMPILED is defined
- * on the compile command line when this file is linked). This also
- * silences -Wmissing-prototypes for those entry points. */
+/* Define JP_ALLOC_IMPLEMENTATION before including the header so the real
+ * (non-inline) declarations of jp_alloc_reset() and jp_alloc_stats() are
+ * visible in this translation unit. This also silences
+ * -Wmissing-prototypes for those entry points. */
+#ifndef JP_ALLOC_IMPLEMENTATION
+#define JP_ALLOC_IMPLEMENTATION
+#endif
 #include "jp_alloc.h"
 
 #ifdef JP_ALLOC_DEBUG
@@ -81,7 +88,6 @@ static _Atomic(size_t) g_cache_misses;
 
 /* ---- Debug header (enabled by -DJP_ALLOC_DEBUG) ---- */
 #ifdef JP_ALLOC_DEBUG
-#define JP_SIZED_MAGIC   0x513A1DEDD01DULL  /* "SIZED"  */
 #define JP_UNSIZED_MAGIC 0x0BADDEA11DECULL  /* "DEALLOC" */
 #define JP_STATE_FREE    0xDEADBEEFFULL
 #define JP_STATE_LIVE    0xCAFEBABEULL
@@ -89,17 +95,6 @@ static _Atomic(size_t) g_cache_misses;
 #define JP_CHECK(cond, ...) do { \
 	if(!(cond)) { fprintf(stderr, "jp_alloc: " __VA_ARGS__); abort(); } \
 } while(0)
-
-/* Header for the sized path. 32 bytes on 64-bit, 16-aligned. */
-struct sized_header {
-	uint64_t magic;
-	uint64_t state;
-	size_t size;
-	struct sized_header *next;
-};
-#define JP_SIZED_HDRSZ sizeof(struct sized_header)
-#else
-#define JP_SIZED_HDRSZ 0
 #endif
 
 /* ---- OS page allocation ---- */
@@ -214,16 +209,8 @@ struct pool {
 	char _pad[56];               /* pad to a 64-byte cache line */
 };
 
-struct sized_pool {
-	void * volatile head;
-	char _pad[56];
-};
-
 static _Alignas(64) struct pool g_pools[JP_ALLOC_POOL_COUNT];
 static struct pool *g_pools_last = g_pools + JP_ALLOC_POOL_COUNT - 1;
-
-static _Alignas(64) struct sized_pool g_sized_pools[JP_ALLOC_POOL_COUNT];
-static struct sized_pool *g_sized_pools_last = g_sized_pools + JP_ALLOC_POOL_COUNT - 1;
 
 /* ---- Epoch-Based Reclamation (3-epoch ring) ----
  *
@@ -231,10 +218,9 @@ static struct sized_pool *g_sized_pools_last = g_sized_pools + JP_ALLOC_POOL_COU
  * section. The global epoch counter advances only when every registered
  * thread is either inactive or has announced the current epoch.
  *
- * Per-thread retired batches are stored per-pool (sized or unsized) and
- * per epoch-slot (epoch % 3) so drainage is an O(1) global freelist splice
- * of a single pool's chain. This keeps the drain path simple (no mixed
- * size classes) and avoids any block-size-at-free-time lookup.
+ * Per-thread retired batches are stored per-pool and per epoch-slot
+ * (epoch % 3) so drainage is an O(1) global freelist splice of a single
+ * pool's chain. This keeps the drain path simple.
  *
  * Slot semantics: a block retired at retire_epoch=R lives in slot (R%3).
  * When g_epoch advances from old to old+1, slot ((old-1) % 3) is safe to
@@ -276,20 +262,17 @@ static _Atomic(struct ebr_thread *) g_thread_list = NULL;
 
 /* Per-pool retired batches for one epoch slot. */
 struct retired_chain {
-	void *head;     /* first block, link via *(void**)block or hdr->s.next */
+	void *head;     /* first block, link via hdr->s.next */
 	void *tail;     /* last block, link == NULL */
 };
 
 struct tls_state {
 	struct ebr_thread *self;
-	/* caches */
-	void *sized_cache[JP_ALLOC_POOL_COUNT][JP_CACHE_N];
-	size_t sized_cnt[JP_ALLOC_POOL_COUNT];
-	void *unsized_cache[JP_ALLOC_POOL_COUNT][JP_CACHE_N];
-	size_t unsized_cnt[JP_ALLOC_POOL_COUNT];
+	/* cache */
+	void *cache[JP_ALLOC_POOL_COUNT][JP_CACHE_N];
+	size_t cnt[JP_ALLOC_POOL_COUNT];
 	/* retired batches: per-pool, per-epoch-slot */
-	struct retired_chain retired_sized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
-	struct retired_chain retired_unsized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+	struct retired_chain retired[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
 	int in_pop_cs;     /* re-entrancy guard for buddy-split recursion */
 };
 
@@ -336,51 +319,25 @@ static void tls_register(void)
 	tls_registered = 1;
 }
 
-/* Pre-declarations used by tls_destructor and drains */
-static void global_push_sized_chain(struct sized_pool *p, void *chain_head, void *chain_tail);
-static void global_push_unsized_chain(struct pool *p, void *chain_head, void *chain_tail);
+/* Pre-declaration used by tls_destructor and drains */
+static void global_push_chain(struct pool *p, void *chain_head, void *chain_tail);
 
 /* Move this thread's retired batch for (pool pid, slot s) into the global
- * limbo of the same (kind, pid, slot). Other threads may drain it later in
+ * limbo of the same (pid, slot). Other threads may drain it later in
  * ebr_try_advance(). */
 struct limbo_slot {
 	void * volatile head;
 	void * volatile tail;
 	char _pad[64 - 2 * sizeof(void *)];
 };
-static _Alignas(64) struct limbo_slot g_limbo_sized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
-static _Alignas(64) struct limbo_slot g_limbo_unsized[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
+static _Alignas(64) struct limbo_slot g_limbo[JP_ALLOC_POOL_COUNT][JP_EBR_EPOCHS];
 
-/* Sized freelist link accessors — defined here (before any limbo/chain
- * walker uses them) so DEBUG and release share a single chain format.
- *
- * In release mode the link is the first void* of the freed block (in-band,
- * headerless). Under JP_ALLOC_DEBUG the block carries a struct sized_header
- * (magic/state/size/next) at offset 0 and the link lives in the `next`
- * field (offset 24 on 64-bit). */
-static inline void *sized_link_get(void *block)
+static void deposit_to_limbo(size_t pid, int slot, void *head, void *tail)
 {
-#ifdef JP_ALLOC_DEBUG
-	return ((struct sized_header *)block)->next;
-#else
-	return *(void **)block;
-#endif
-}
-static inline void sized_link_set(void *block, void *next)
-{
-#ifdef JP_ALLOC_DEBUG
-	((struct sized_header *)block)->next = (struct sized_header *)next;
-#else
-	*(void **)block = next;
-#endif
-}
-
-static void deposit_to_limbo_sized(size_t pid, int slot, void *head, void *tail)
-{
-	struct limbo_slot *s = &g_limbo_sized[pid][slot];
+	struct limbo_slot *s = &g_limbo[pid][slot];
 	void *old_head = atomic_load_ptr(&s->head);
 	for(;;) {
-		sized_link_set(tail, old_head);
+		((union header *)tail)->s.next = (union header *)old_head;
 		if(atomic_cas_ptr(&s->head, &old_head, head)) break;
 	}
 	/* If we just set head from NULL, also publish tail for future mergers.
@@ -395,37 +352,10 @@ static void deposit_to_limbo_sized(size_t pid, int slot, void *head, void *tail)
 	}
 }
 
-static void deposit_to_limbo_unsized(size_t pid, int slot, void *head, void *tail)
-{
-	struct limbo_slot *s = &g_limbo_unsized[pid][slot];
-	void *old_head = atomic_load_ptr(&s->head);
-	for(;;) {
-		((union header *)tail)->s.next = (union header *)old_head;
-		if(atomic_cas_ptr(&s->head, &old_head, head)) break;
-	}
-	if(old_head == NULL) {
-		__atomic_store_n(&s->tail, tail, __ATOMIC_RELEASE);
-	}
-}
-
 /* Steal and splice a limbo slot's chain onto its global pool. */
-static void drain_limbo_sized(size_t pid, int slot)
+static void drain_limbo(size_t pid, int slot)
 {
-	struct limbo_slot *s = &g_limbo_sized[pid][slot];
-	void *head = __atomic_load_n(&s->head, __ATOMIC_ACQUIRE);
-	if(!head) return;
-	if(!__atomic_compare_exchange_n(&s->head, &head, NULL,
-		0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-		return;
-	/* Walk to find tail (chain ends with link==NULL). */
-	void *tail = head;
-	while(sized_link_get(tail) != NULL) tail = sized_link_get(tail);
-	global_push_sized_chain(&g_sized_pools[pid], head, tail);
-}
-
-static void drain_limbo_unsized(size_t pid, int slot)
-{
-	struct limbo_slot *s = &g_limbo_unsized[pid][slot];
+	struct limbo_slot *s = &g_limbo[pid][slot];
 	void *head = __atomic_load_n(&s->head, __ATOMIC_ACQUIRE);
 	if(!head) return;
 	if(!__atomic_compare_exchange_n(&s->head, &head, NULL,
@@ -433,7 +363,7 @@ static void drain_limbo_unsized(size_t pid, int slot)
 		return;
 	void *tail = head;
 	while(((union header *)tail)->s.next != NULL) tail = ((union header *)tail)->s.next;
-	global_push_unsized_chain(&g_pools[pid], head, tail);
+	global_push_chain(&g_pools[pid], head, tail);
 }
 
 /* ---- TLS destructor: flush caches and retire-list into the global limbo ---- */
@@ -447,26 +377,16 @@ static void tls_destructor(void *p)
 	 * is still pinned to its last announced value; the new chain inherits
 	 * that retire epoch). */
 	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
-		if(t->sized_cnt[pid] > 0) {
-			void *head = t->sized_cache[pid][0];
-			void *tail = t->sized_cache[pid][t->sized_cnt[pid] - 1];
-			for(size_t i = 0; i < t->sized_cnt[pid] - 1; i++)
-				sized_link_set(t->sized_cache[pid][i], t->sized_cache[pid][i+1]);
-			sized_link_set(tail, NULL);
-			t->retired_sized[pid][0].head = head;
-			t->retired_sized[pid][0].tail = tail;
-			t->sized_cnt[pid] = 0;
-		}
-		if(t->unsized_cnt[pid] > 0) {
-			void *head = t->unsized_cache[pid][0];
-			void *tail = t->unsized_cache[pid][t->unsized_cnt[pid] - 1];
-			for(size_t i = 0; i < t->unsized_cnt[pid] - 1; i++)
-				((union header *)t->unsized_cache[pid][i])->s.next =
-					(union header *)t->unsized_cache[pid][i+1];
+		if(t->cnt[pid] > 0) {
+			void *head = t->cache[pid][0];
+			void *tail = t->cache[pid][t->cnt[pid] - 1];
+			for(size_t i = 0; i < t->cnt[pid] - 1; i++)
+				((union header *)t->cache[pid][i])->s.next =
+					(union header *)t->cache[pid][i+1];
 			((union header *)tail)->s.next = NULL;
-			t->retired_unsized[pid][0].head = head;
-			t->retired_unsized[pid][0].tail = tail;
-			t->unsized_cnt[pid] = 0;
+			t->retired[pid][0].head = head;
+			t->retired[pid][0].tail = tail;
+			t->cnt[pid] = 0;
 		}
 	}
 
@@ -475,17 +395,11 @@ static void tls_destructor(void *p)
 	 * future epoch advance, which is ABA-safe. */
 	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
 		for(int slot = 0; slot < JP_EBR_EPOCHS; slot++) {
-			if(t->retired_sized[pid][slot].head) {
-				deposit_to_limbo_sized(pid, slot,
-					t->retired_sized[pid][slot].head,
-					t->retired_sized[pid][slot].tail);
-				t->retired_sized[pid][slot].head = t->retired_sized[pid][slot].tail = NULL;
-			}
-			if(t->retired_unsized[pid][slot].head) {
-				deposit_to_limbo_unsized(pid, slot,
-					t->retired_unsized[pid][slot].head,
-					t->retired_unsized[pid][slot].tail);
-				t->retired_unsized[pid][slot].head = t->retired_unsized[pid][slot].tail = NULL;
+			if(t->retired[pid][slot].head) {
+				deposit_to_limbo(pid, slot,
+					t->retired[pid][slot].head,
+					t->retired[pid][slot].tail);
+				t->retired[pid][slot].head = t->retired[pid][slot].tail = NULL;
 			}
 		}
 	}
@@ -554,27 +468,20 @@ static void ebr_try_advance(void)
 
 	/* Drain per-thread retired batches for this slot into the global pools. */
 	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
-		if(tls.retired_sized[pid][drain_slot].head) {
-			void *h = tls.retired_sized[pid][drain_slot].head;
-			void *t = tls.retired_sized[pid][drain_slot].tail;
-			tls.retired_sized[pid][drain_slot].head = tls.retired_sized[pid][drain_slot].tail = NULL;
-			global_push_sized_chain(&g_sized_pools[pid], h, t);
-		}
-		if(tls.retired_unsized[pid][drain_slot].head) {
-			void *h = tls.retired_unsized[pid][drain_slot].head;
-			void *t = tls.retired_unsized[pid][drain_slot].tail;
-			tls.retired_unsized[pid][drain_slot].head = tls.retired_unsized[pid][drain_slot].tail = NULL;
-			global_push_unsized_chain(&g_pools[pid], h, t);
+		if(tls.retired[pid][drain_slot].head) {
+			void *h = tls.retired[pid][drain_slot].head;
+			void *t = tls.retired[pid][drain_slot].tail;
+			tls.retired[pid][drain_slot].head = tls.retired[pid][drain_slot].tail = NULL;
+			global_push_chain(&g_pools[pid], h, t);
 		}
 		/* Drain the limbo (other dead threads' deposits) for this slot too. */
-		drain_limbo_sized(pid, drain_slot);
-		drain_limbo_unsized(pid, drain_slot);
+		drain_limbo(pid, drain_slot);
 	}
 }
 
 /* ---- Header'd pool operations (cache + EBR-protected global freelist) ---- */
 
-static void global_push_unsized_chain(struct pool *p, void *chain_head, void *chain_tail)
+static void global_push_chain(struct pool *p, void *chain_head, void *chain_tail)
 {
 	void *old = atomic_load_ptr(&p->head);
 	do {
@@ -590,23 +497,23 @@ static void pool_put(union header *h, struct pool *p, size_t pid)
 	h->s.state = JP_STATE_FREE;
 #endif
 	/* Try the per-thread cache first. */
-	if(likely(tls.unsized_cnt[pid] < JP_CACHE_N)) {
-		tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = h;
+	if(likely(tls.cnt[pid] < JP_CACHE_N)) {
+		tls.cache[pid][tls.cnt[pid]++] = h;
 		return;
 	}
 	/* Cache full: flush half as a single chain (LIFO order; the bottom of
 	 * the stack becomes the new head of the retired chain). */
-	void *flush_head = tls.unsized_cache[pid][0];
-	void *flush_tail = tls.unsized_cache[pid][JP_CACHE_FLUSH - 1];
+	void *flush_head = tls.cache[pid][0];
+	void *flush_tail = tls.cache[pid][JP_CACHE_FLUSH - 1];
 	for(size_t i = 0; i < JP_CACHE_FLUSH - 1; i++)
-		((union header *)tls.unsized_cache[pid][i])->s.next =
-			(union header *)tls.unsized_cache[pid][i+1];
+		((union header *)tls.cache[pid][i])->s.next =
+			(union header *)tls.cache[pid][i+1];
 	((union header *)flush_tail)->s.next = NULL;
 	/* Compact remaining entries down. */
-	tls.unsized_cnt[pid] -= JP_CACHE_FLUSH;
-	memmove(&tls.unsized_cache[pid][0],
-		&tls.unsized_cache[pid][JP_CACHE_FLUSH],
-		tls.unsized_cnt[pid] * sizeof(void *));
+	tls.cnt[pid] -= JP_CACHE_FLUSH;
+	memmove(&tls.cache[pid][0],
+		&tls.cache[pid][JP_CACHE_FLUSH],
+		tls.cnt[pid] * sizeof(void *));
 	/* Append h to the chain (cheaper than a separate retire). */
 	((union header *)flush_tail)->s.next = h;
 	((union header *)h)->s.next = NULL;
@@ -614,7 +521,7 @@ static void pool_put(union header *h, struct pool *p, size_t pid)
 	/* Retire the chain at current epoch. */
 	long e = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
 	int slot = (int)(e % JP_EBR_EPOCHS);
-	struct retired_chain *rc = &tls.retired_unsized[pid][slot];
+	struct retired_chain *rc = &tls.retired[pid][slot];
 	if(rc->head == NULL) {
 		rc->head = flush_head;
 		rc->tail = flush_tail;
@@ -628,9 +535,9 @@ static void pool_put(union header *h, struct pool *p, size_t pid)
 static void *pool_get(struct pool *p, size_t pid)
 	{
 		/* Try cache first. */
-		if(likely(tls.unsized_cnt[pid] > 0)) {
+		if(likely(tls.cnt[pid] > 0)) {
 			JP_COUNT_HIT;
-			return (union header *)tls.unsized_cache[pid][--tls.unsized_cnt[pid]];
+			return (union header *)tls.cache[pid][--tls.cnt[pid]];
 		}
 		/* Cache miss: batched refill from the global freelist under EBR.
 		 * Pop up to JP_REFILL blocks in one CAS — the first becomes the
@@ -674,7 +581,7 @@ static void *pool_get(struct pool *p, size_t pid)
 						if(install > JP_CACHE_N - 1) install = JP_CACHE_N - 1;
 						size_t i = 0;
 						while(i < install) {
-							tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = cur;
+							tls.cache[pid][tls.cnt[pid]++] = cur;
 							cur = ((union header *)cur)->s.next;
 							i++;
 						}
@@ -711,8 +618,8 @@ static void *pool_get(struct pool *p, size_t pid)
 					/* Recycle the spare buddy into OUR cache (not the parent's),
 					 * so the spare is reused locally rather than bouncing back
 					 * to the global freelist. */
-					if(likely(tls.unsized_cnt[pid] < JP_CACHE_N)) {
-						tls.unsized_cache[pid][tls.unsized_cnt[pid]++] = spare;
+					if(likely(tls.cnt[pid] < JP_CACHE_N)) {
+						tls.cache[pid][tls.cnt[pid]++] = spare;
 					} else {
 						/* Unlikely; fall back to retiring it. */
 						pool_put(spare, p, pid);
@@ -750,160 +657,6 @@ static size_t pool_id(size_t size)
 static int is_pow2(size_t n)
 {
 	return (n & (n - 1)) == 0;
-}
-
-/* ---- Headerless sized pool operations ---- */
-
-static size_t pool_id_sized(size_t size)
-{
-	size += JP_SIZED_HDRSZ;
-	if(size < 16) size = 16;
-	return 64 - __builtin_clzll(size - 1);
-}
-
-static void global_push_sized_chain(struct sized_pool *p, void *chain_head, void *chain_tail)
-{
-	void *old = atomic_load_ptr(&p->head);
-	do {
-		sized_link_set(chain_tail, old);
-	} while(!atomic_cas_ptr(&p->head, &old, chain_head));
-}
-
-static void sized_pool_put(void *mem, struct sized_pool *p, size_t pid)
-{
-	(void)p;
-#ifdef JP_ALLOC_DEBUG
-	struct sized_header *h = (struct sized_header *)mem;
-	h->magic = JP_SIZED_MAGIC;
-	h->state = JP_STATE_FREE;
-#endif
-	if(likely(tls.sized_cnt[pid] < JP_CACHE_N)) {
-		tls.sized_cache[pid][tls.sized_cnt[pid]++] = mem;
-		return;
-	}
-	/* Flush half as a chain. */
-	void *flush_head = tls.sized_cache[pid][0];
-	void *flush_tail = tls.sized_cache[pid][JP_CACHE_FLUSH - 1];
-	for(size_t i = 0; i < JP_CACHE_FLUSH - 1; i++)
-		sized_link_set(tls.sized_cache[pid][i], tls.sized_cache[pid][i+1]);
-	sized_link_set(flush_tail, NULL);
-	tls.sized_cnt[pid] -= JP_CACHE_FLUSH;
-	memmove(&tls.sized_cache[pid][0],
-		&tls.sized_cache[pid][JP_CACHE_FLUSH],
-		tls.sized_cnt[pid] * sizeof(void *));
-	/* Append the freshly-freed block to the chain. */
-	sized_link_set(flush_tail, mem);
-	sized_link_set(mem, NULL);
-	flush_tail = mem;
-	/* Retire. */
-	long e = __atomic_load_n(&g_epoch, __ATOMIC_ACQUIRE);
-	int slot = (int)(e % JP_EBR_EPOCHS);
-	struct retired_chain *rc = &tls.retired_sized[pid][slot];
-	if(rc->head == NULL) {
-		rc->head = flush_head;
-		rc->tail = flush_tail;
-	} else {
-		sized_link_set(rc->tail, flush_head);
-		rc->tail = flush_tail;
-	}
-	ebr_try_advance();
-}
-
-static void *sized_pool_get(size_t pid)
-{
-	if(likely(tls.sized_cnt[pid] > 0)) {
-		JP_COUNT_HIT;
-		return tls.sized_cache[pid][--tls.sized_cnt[pid]];
-	}
-	/* Cache miss: batched refill from global freelist under EBR. */
-	JP_COUNT_MISS;
-	int outer = !tls.in_pop_cs;
-	if(outer) {
-		ebr_enter();
-		tls.in_pop_cs = 1;
-	}
-	void *result = NULL;
-	{
-		void *head = atomic_load_ptr(&g_sized_pools[pid].head);
-		for(;;) {
-			if(head == NULL) break;
-			void *tail = head; size_t n = 1;
-			while(n < JP_REFILL) {
-				void *next = sized_link_get(tail);
-				if(next == NULL) break;
-				tail = next; n++;
-			}
-			void *new_head;
-			if(n < JP_REFILL) {
-				new_head = NULL;
-			} else {
-				new_head = sized_link_get(tail);
-			}
-			if(atomic_cas_ptr(&g_sized_pools[pid].head, &head, new_head)) {
-				result = head;
-				if(n > 1) {
-					void *cur = sized_link_get(head);
-					sized_link_set(tail, NULL);
-					size_t install = n - 1;
-					if(install > JP_CACHE_N - 1) install = JP_CACHE_N - 1;
-					size_t i = 0;
-					while(i < install) {
-						tls.sized_cache[pid][tls.sized_cnt[pid]++] = cur;
-						cur = sized_link_get(cur);
-						i++;
-					}
-				}
-				break;
-			}
-		}
-	}
-	if(result == NULL) {
-		if(unlikely(&g_sized_pools[pid] == g_sized_pools_last)) {
-			size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
-			result = os_alloc_pages(sz);
-#ifdef JP_ALLOC_DEBUG
-			if(result) {
-				struct sized_header *h = (struct sized_header *)result;
-				h->magic = JP_SIZED_MAGIC;
-				h->state = JP_STATE_FREE;
-			}
-#endif
-		} else {
-			char *mem = (char *)sized_pool_get(pid + 1);
-			if(mem != NULL) {
-				size_t buddy_size = 1U << pid;
-				result = mem;
-				void *spare = mem + buddy_size;
-#ifdef JP_ALLOC_DEBUG
-				struct sized_header *sh = (struct sized_header *)spare;
-				sh->magic = JP_SIZED_MAGIC;
-				sh->state = JP_STATE_FREE;
-#endif
-				if(likely(tls.sized_cnt[pid] < JP_CACHE_N)) {
-					tls.sized_cache[pid][tls.sized_cnt[pid]++] = spare;
-				} else {
-					sized_pool_put(spare, &g_sized_pools[pid], pid);
-				}
-			}
-		}
-	}
-	if(outer) {
-		tls.in_pop_cs = 0;
-		ebr_exit();
-	}
-#ifdef JP_ALLOC_DEBUG
-	if(result != NULL) {
-		struct sized_header *h = (struct sized_header *)result;
-		JP_CHECK(h->magic == JP_SIZED_MAGIC,
-			 "sized_pool_get: wrong magic %llx (expected %llx)\n",
-			 (unsigned long long)h->magic,
-			 (unsigned long long)JP_SIZED_MAGIC);
-		JP_CHECK(h->state == JP_STATE_FREE,
-			 "sized_pool_get: ABA! block %p still LIVE (state=%llx)\n",
-			 result, (unsigned long long)h->state);
-	}
-#endif
-	return result;
 }
 
 /* ---- Aligned page allocation (header'd path) ---- */
@@ -951,116 +704,6 @@ size_t jp_good_size(size_t size)
 		size = (size + ps_mask) & ~ps_mask;
 	}
 	return size - sizeof(union header);
-}
-
-/* Sized API (headerless) */
-
-void *jp_alloc_sized(size_t size)
-{
-	size_t pid = pool_id_sized(size);
-	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
-		void *block = sized_pool_get(pid);
-		if(block) {
-#ifdef JP_ALLOC_DEBUG
-			struct sized_header *h = (struct sized_header *)block;
-			h->magic = JP_SIZED_MAGIC;
-			h->state = JP_STATE_LIVE;
-			h->size = size;
-#endif
-			return (char *)block + JP_SIZED_HDRSZ;
-		}
-		return NULL;
-	} else {
-		size_t ps_mask = os_page_size() - 1;
-		size_t total = size + JP_SIZED_HDRSZ;
-		size_t alloc_size = (total + ps_mask) & ~ps_mask;
-		void *block = os_alloc_pages(alloc_size);
-		if(block) {
-#ifdef JP_ALLOC_DEBUG
-			struct sized_header *h = (struct sized_header *)block;
-			h->magic = JP_SIZED_MAGIC;
-			h->state = JP_STATE_LIVE;
-			h->size = size;
-#endif
-			return (char *)block + JP_SIZED_HDRSZ;
-		}
-		return NULL;
-	}
-}
-
-void jp_free_sized(void *mem, size_t size)
-{
-	if(unlikely(mem == NULL)) return;
-
-#ifdef JP_ALLOC_DEBUG
-	struct sized_header *h = (struct sized_header *)((char *)mem - JP_SIZED_HDRSZ);
-	JP_CHECK(h->magic == JP_SIZED_MAGIC,
-		 "jp_free_sized: wrong API on %p (magic=%llx, not SIZED)\n",
-		 mem, (unsigned long long)h->magic);
-	JP_CHECK(h->state == JP_STATE_LIVE,
-		 "jp_free_sized: double free on %p (state=%llx)\n",
-		 mem, (unsigned long long)h->state);
-	JP_CHECK(h->size == size,
-		 "jp_free_sized: size mismatch on %p (got %zu, expected %zu)\n",
-		 mem, h->size, size);
-	h->state = JP_STATE_FREE;
-	void *block = h;
-#else
-	void *block = mem;
-#endif
-
-	size_t pid = pool_id_sized(size);
-	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
-		sized_pool_put(block, &g_sized_pools[pid], pid);
-	} else {
-		size_t ps_mask = os_page_size() - 1;
-		size_t total = size + JP_SIZED_HDRSZ;
-		size_t alloc_size = (total + ps_mask) & ~ps_mask;
-		os_free_pages(block, alloc_size);
-	}
-}
-
-void *jp_realloc_sized(void *mem, size_t oldsz, size_t newsz)
-{
-	if(newsz == 0) {
-		jp_free_sized(mem, oldsz);
-		return NULL;
-	}
-	if(mem == NULL) {
-		return jp_alloc_sized(newsz);
-	}
-#ifdef JP_ALLOC_DEBUG
-	{
-		struct sized_header *h = (struct sized_header *)((char *)mem - JP_SIZED_HDRSZ);
-		JP_CHECK(h->magic == JP_SIZED_MAGIC,
-			 "jp_realloc_sized: wrong API on %p (magic=%llx)\n",
-			 mem, (unsigned long long)h->magic);
-		JP_CHECK(h->state == JP_STATE_LIVE,
-			 "jp_realloc_sized: non-live block %p (state=%llx)\n",
-			 mem, (unsigned long long)h->state);
-		JP_CHECK(h->size == oldsz,
-			 "jp_realloc_sized: oldsz mismatch on %p (got %zu, expected %zu)\n",
-			 mem, h->size, oldsz);
-	}
-#endif
-	size_t old_pid = pool_id_sized(oldsz);
-	size_t new_pid = pool_id_sized(newsz);
-	if(old_pid == new_pid) {
-		if(old_pid < JP_ALLOC_POOL_COUNT)
-			return mem;
-		size_t ps_mask = os_page_size() - 1;
-		size_t old_total = oldsz + JP_SIZED_HDRSZ;
-		size_t new_total = newsz + JP_SIZED_HDRSZ;
-		if(((old_total + ps_mask) & ~ps_mask) == ((new_total + ps_mask) & ~ps_mask))
-			return mem;
-	}
-	void *new_mem = jp_alloc_sized(newsz);
-	if(new_mem) {
-		size_t copy_size = oldsz < newsz ? oldsz : newsz;
-		memcpy(new_mem, mem, copy_size);
-		jp_free_sized(mem, oldsz);
-	}
-	return new_mem;
 }
 
 void jp_alloc_reset(void)

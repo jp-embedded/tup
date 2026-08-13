@@ -88,15 +88,15 @@ run_variant() {
 run_variant "release" \
 	"jpbench_rel" \
 	-O2 -Wall -Wextra -Wno-unused-result \
-	-DJP_ALLOC_COMPILED -DJP_ALLOC_BENCH \
+	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_BENCH -I"$PWD/../../src/jp_alloc" \
 	"$ALLOC_C" "$BENCH_C" \
 	-lpthread -lrt -lm
 
-# --- Variant 2: JP_ALLOC_DEBUG (ABA / double-free / wrong-API self-checks) ---
+# --- Variant 2: JP_ALLOC_DEBUG (ABA / double-free / corruption self-checks) ---
 run_variant "debug-self-check" \
 	"jpbench_dbg" \
 	-O1 -g -Wall -Wextra -Wno-unused-result \
-	-DJP_ALLOC_COMPILED -DJP_ALLOC_DEBUG -DJP_ALLOC_BENCH \
+	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_DEBUG -DJP_ALLOC_BENCH -I"$PWD/../../src/jp_alloc" \
 	"$ALLOC_C" "$BENCH_C" \
 	-lpthread -lrt -lm
 
@@ -108,7 +108,7 @@ OPS=10000
 run_variant "release-300-threads" \
 	"jpbench_300" \
 	-O2 -Wall -Wextra -Wno-unused-result \
-	-DJP_ALLOC_COMPILED -DJP_ALLOC_BENCH \
+	-DJP_ALLOC_IMPLEMENTATION -DJP_ALLOC_BENCH -I"$PWD/../../src/jp_alloc" \
 	"$ALLOC_C" "$BENCH_C" \
 	-lpthread -lrt -lm
 THREADS=$prev_threads

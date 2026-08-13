@@ -150,6 +150,19 @@ static void graph_burn(struct thread_state *t, uint64_t *rng)
 	for(int i = 0; i < EDGES_PER_OP; i++)
 		edges[i] = (struct link *)jp_alloc_sized(SZ_EDGE);
 
+	/* Touch the first byte of each block to force its first cache line
+	 * into L1, simulating the caller's first field write that real tup
+	 * does immediately after allocation (tent->dt, node->tnode.tupid, etc).
+	 * This isolates the test to pool-class inflation: both sized and
+	 * unsized paths now touch the same first cache line, so the only
+	 * remaining difference is block size (256 vs 512 for tent etc.). */
+	if(tent) memset(tent,0,SZ_TENT);
+	if(file) memset(file,0,SZ_FILE);
+	for(int i = 0; i < NODES_PER_OP; i++)
+		if(nodes[i]) memset(nodes[i],0,SZ_NODE);
+	for(int i = 0; i < EDGES_PER_OP; i++)
+		if(edges[i]) memset(edges[i],0,SZ_EDGE);
+
 	/* briefly link nodes through edges to mimic graph edge wiring */
 	for(int i = 0; i < EDGES_PER_OP; i++)
 		edges[i]->next = nodes[i % NODES_PER_OP];
@@ -197,6 +210,8 @@ static void alloc_heavy_burn(struct thread_state *t, uint64_t *rng)
 		ah_state.cnt = 0;
 	}
 	ah_state.ring[ah_state.cnt++] = jp_alloc_sized(SZ_NODE);
+	if(ah_state.ring[ah_state.cnt - 1])
+		memset(ah_state.ring[ah_state.cnt - 1],0,SZ_NODE);
 }
 
 static void alloc_heavy_drain(void)
@@ -461,15 +476,13 @@ int main(int argc, char **argv)
 	printf("peak RSS        : %zu kB\n", peak_rss_kb());
 
 	/* Cache hit rate — only meaningful when JP_ALLOC_DEBUG is defined in
-	 * the linked jp_alloc.c (the counters compile out in release). When
-	 * the bench is built without jp_alloc.c (comparison-allocator mode),
-	 * jp_alloc_stats() also returns zeros; we distinguish the two cases
-	 * via the JP_ALLOC_COMPILED macro. */
+	 * the linked jp_alloc.c (the counters compile out in release). In
+	 * comparison-allocator mode (no jp_alloc.c linked), jp_alloc_stats()
+	 * returns zeros via the inline stub. */
 	{
 		size_t hits = 0, misses = 0;
 		jp_alloc_stats(&hits, &misses);
-#ifdef JP_ALLOC_COMPILED
-# ifdef JP_ALLOC_DEBUG
+#ifdef JP_ALLOC_DEBUG
 		if(hits + misses > 0) {
 			double rate = 100.0 * (double)hits / (double)(hits + misses);
 			printf("cache hit rate  : %.1f%%  (hits=%zu  misses=%zu)\n",
@@ -477,11 +490,9 @@ int main(int argc, char **argv)
 		} else {
 			printf("cache hit rate  : (no cache activity recorded)\n");
 		}
-# else
-		printf("cache hit rate  : (counters only in JP_ALLOC_DEBUG build)\n");
-# endif
 #else
-		printf("cache hit rate  : (no jp_alloc linked — comparison allocator)\n");
+		(void)hits; (void)misses;
+		printf("cache hit rate  : (counters only in JP_ALLOC_DEBUG build)\n");
 #endif
 	}
 
