@@ -478,6 +478,17 @@ int main(int argc, char **argv)
 	printf("peak RSS        : %zu kB\n", peak_rss_kb());
 
 #ifdef JP_ALLOC_DEBUG
+	/* Cache hit/miss counters for comparing allocator designs. */
+	{
+		extern void jp_alloc_diag(size_t *, size_t *);
+		size_t hits = 0, misses = 0;
+		jp_alloc_diag(&hits, &misses);
+		if(hits + misses > 0) {
+			double rate = 100.0 * (double)hits / (double)(hits + misses);
+			printf("cache hit rate  : %.1f%%  (hits=%zu  misses=%zu)\n",
+				rate, hits, misses);
+		}
+	}
 	/* When run under JP_ALLOC_DEBUG the allocator aborts on the first ABA
 	 * / double-free / corruption event. Reaching here means none fired. */
 	printf("ABA self-check  : no ABA / corruption detected\n");
