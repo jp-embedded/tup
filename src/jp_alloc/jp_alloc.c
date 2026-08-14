@@ -241,55 +241,22 @@ struct magazine {
 
 /* ---- Static magazine pool ----
  *
- * A fixed array of magazines, allocated via a CAS-based free-list. No
- * mmap, no malloc, no mutex — eliminates the race conditions that arose
- * from dynamic magazine allocation. The array is large enough for
- * typical workloads (300 threads x ~5 active pools = ~1500 magazines).
- * If exhausted, the flush path falls back to the old linked-list chain
- * retire (rare — only under extreme contention at scale). */
-#define JP_MAG_COUNT 256
+ * A CAS-based free-list hands out magazines. When the free-list is empty,
+ * a magazine is allocated from the pool system (pool 8 = 256B block, which
+ * fits the ~136-byte magazine struct + 16-byte header). Magazines are never
+ * freed to the OS — they cycle between the TLS empty stack, the global
+ * magazine lists, and the free-list forever. 
+ * Magazines come from a fixed pool count (pool 8 = 256B), which is backed
+ * by the 8MB demand-paged reserve. The first magazine allocation triggers
+ * one buddy-split from pool 23, populating ~16K magazines from one mmap.
+ * Only the touched pages count toward RSS (~28 pages = 112 KB). */
+#define JP_MAG_PID 8  /* pool 8 = 256B block, fits struct magazine + header */
 
-static struct magazine g_mag_array[JP_MAG_COUNT];
 static struct magazine * volatile g_mag_free = NULL;
-static int g_mag_initialized = 0;
-
-static void mag_init(void)
-{
-	/* Thread-safe init: if two threads both see g_mag_initialized == 0,
-	 * they both initialize the chain. The final state is identical
-	 * (the chain links are the same regardless of who writes them).
-	 * The g_mag_free CAS in mag_alloc handles concurrent pops safely. */
-	int expected = 0;
-	if(__atomic_compare_exchange_n(&g_mag_initialized, &expected, 1,
-		0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-		for(int i = 0; i < JP_MAG_COUNT - 1; i++)
-			g_mag_array[i].next = &g_mag_array[i + 1];
-		g_mag_array[JP_MAG_COUNT - 1].next = NULL;
-		g_mag_free = &g_mag_array[0];
-	} else {
-		/* Another thread is initializing — wait for it. */
-		while(g_mag_free == NULL && !g_mag_initialized) {
-			/* Spin-wait. Very brief — just the for-loop time. */
-		}
-	}
-}
-
-static struct magazine *mag_alloc(void)
-{
-	/* Lazy init (first call). Not a race — if two threads both call
-	 * mag_init, the for-loop just re-links the same array; the final
-	 * state is identical. The g_mag_free CAS handles concurrent pops. */
-	struct magazine *m = atomic_load_ptr((void * volatile *)&g_mag_free);
-	for(;;) {
-		if(!m) return NULL;
-		struct magazine *next = m->next;
-		if(atomic_cas_ptr((void * volatile *)&g_mag_free, (void **)&m, next))
-			return m;
-	}
-}
 
 static void mag_free(struct magazine *m)
 {
+	/* Return to the CAS-based free-list for reuse by other threads. */
 	struct magazine *old = atomic_load_ptr((void * volatile *)&g_mag_free);
 	do {
 		m->next = old;
@@ -305,6 +272,28 @@ struct pool {
 
 static _Alignas(JP_CACHELINE) struct pool g_pools[JP_ALLOC_POOL_COUNT];
 static struct pool *g_pools_last = g_pools + JP_ALLOC_POOL_COUNT - 1;
+
+static void *pool_get(struct pool *p, size_t pid); /* forward decl */
+static struct magazine *mag_alloc(void)
+{
+	/* Try the free-list first (recycled magazines). */
+	struct magazine *m = atomic_load_ptr((void * volatile *)&g_mag_free);
+	for(;;) {
+		if(!m) break;
+		struct magazine *next = m->next;
+		if(atomic_cas_ptr((void * volatile *)&g_mag_free, (void **)&m, next))
+			return m;
+	}
+	/* Free-list empty — allocate from the pool system.
+	 * The pool block includes a 16-byte union header; the magazine
+	 * struct is placed after the header (like any malloc'd block). */
+	union header *h = (union header *)pool_get(g_pools + JP_MAG_PID, JP_MAG_PID);
+	if(!h) return NULL;
+	h->s.size = JP_MAG_PID;
+	return (struct magazine *)(h + 1);
+}
+
+
 
 /* ---- Epoch-Based Reclamation (3-epoch ring) ---- */
 
