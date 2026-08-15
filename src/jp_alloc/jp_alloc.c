@@ -1,7 +1,7 @@
 /* jp_alloc - lock-free memory allocator
  *
  * https://github.com/jp-embedded/jp_alloc
- * GPL-2.0-or-later
+ * GPL-3.0-or-later
  *
  * A lock-free, EBR-protected, thread-caching memory allocator written in
  * pure C11. Features:
@@ -109,6 +109,34 @@ static inline int jp_clzll(unsigned long long x)
 }
 #else
 #define jp_clzll(x) __builtin_clzll(x)
+#endif
+
+/* ---- Single-threaded fast path ----
+ *
+ * glibc 2.32+ provides __libc_single_threaded: a char that starts at 1
+ * (single-threaded) and transitions to 0 exactly once when pthread_create
+ * is called (never goes back to 1). This lets us skip EBR overhead
+ * (epoch stores, thread-list walk, g_epoch CAS) in single-threaded mode.
+ *
+ * The CAS on the magazine list is always used (even single-threaded) —
+ * it's uncontended but atomic, so it's safe if pthread_create fires
+ * mid-operation. The EBR skip only affects per-thread state (epoch,
+ * active flag) and the pointless ebr_try_advance walk.
+ *
+ * On older glibc or non-glibc platforms: always multi-threaded path
+ * (dead branch, zero cost). */
+
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#if __GLIBC_PREREQ(2, 32)
+#include <sys/single_threaded.h>
+#define JP_HAVE_SINGLE_THREADED 1
+#endif
+#endif
+
+#ifdef JP_HAVE_SINGLE_THREADED
+#define jp_single_threaded() (__atomic_load_n(&__libc_single_threaded, __ATOMIC_ACQUIRE))
+#else
+#define jp_single_threaded() (0)
 #endif
 
 /* ---- Debug header (enabled by -DJP_ALLOC_DEBUG) ---- */
@@ -613,7 +641,8 @@ static void pool_put(union header *h, struct pool *p, size_t pid)
 		rc->tail->next = mag;
 		rc->tail = mag;
 	}
-	ebr_try_advance();
+	if(!jp_single_threaded())
+		ebr_try_advance();
 }
 
 static void *pool_get(struct pool *p, size_t pid)
@@ -625,8 +654,9 @@ static void *pool_get(struct pool *p, size_t pid)
 	}
 	/* Cache miss: try to pop a full magazine from the global list. */
 	JP_COUNT_MISS;
+	int single = jp_single_threaded();
 	int outer = !tls.in_pop_cs;
-	if(outer) {
+	if(outer && !single) {
 		ebr_enter();
 		tls.in_pop_cs = 1;
 	}
@@ -682,7 +712,7 @@ static void *pool_get(struct pool *p, size_t pid)
 			}
 		}
 	}
-	if(outer) {
+	if(outer && !single) {
 		tls.in_pop_cs = 0;
 		ebr_exit();
 	}
