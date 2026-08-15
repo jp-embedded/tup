@@ -91,6 +91,15 @@ static _Atomic(size_t) g_cache_misses;
 #endif
 #endif
 
+/* madvise(MADV_DONTNEED) returns freed large-block pages to the OS,
+ * reducing RSS. Only applies to pools where blocks are page-aligned
+ * and span whole pages (pid >= JP_MADVISE_PID). Smaller blocks share
+ * pages with other blocks and can't be madvise'd individually.
+ * Disabled on Windows (no madvise). */
+#ifndef JP_MADVISE_PID
+#define JP_MADVISE_PID 12  /* pool 12 = 4KB blocks — first page-aligned pool */
+#endif
+
 /* __builtin_clzll fallback for MSVC */
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -371,6 +380,7 @@ static void tls_register(void)
 
 /* Pre-declarations */
 static void global_push_magazine(struct pool *p, struct magazine *head, struct magazine *tail);
+static void magazine_madvise(struct magazine *head, size_t pid);
 
 /* ---- Limbo (for thread teardown) ---- */
 
@@ -400,6 +410,7 @@ static void drain_limbo(size_t pid, int slot)
 		return;
 	struct magazine *tail = head;
 	while(tail->next != NULL) tail = tail->next;
+	magazine_madvise(head, pid);
 	global_push_magazine(&g_pools[pid], head, tail);
 }
 
@@ -497,6 +508,7 @@ static void ebr_try_advance(void)
 			struct magazine *h = tls.retired[pid][drain_slot].head;
 			struct magazine *t = tls.retired[pid][drain_slot].tail;
 			tls.retired[pid][drain_slot].head = tls.retired[pid][drain_slot].tail = NULL;
+			magazine_madvise(h, pid);
 			global_push_magazine(&g_pools[pid], h, t);
 		}
 		drain_limbo(pid, drain_slot);
@@ -504,6 +516,28 @@ static void ebr_try_advance(void)
 }
 
 /* ---- Pool operations (magazine-based) ---- */
+
+/* Return large-block pages to the OS when magazines are drained to the
+ * global list. Only for pools where blocks span whole pages (pid >=
+ * JP_MADVISE_PID). The block's s.size header is zeroed by madvise —
+ * jp_alloc re-writes it unconditionally after pool_get, so this is safe.
+ * Called at EBR drain time (not per-free), so madvise syscall cost is
+ * amortized across ~16 blocks per drain. */
+#ifndef _WIN32
+static void magazine_madvise(struct magazine *head, size_t pid)
+{
+	if(pid < JP_MADVISE_PID) return;
+	size_t sz = 1U << pid;
+	for(struct magazine *m = head; m; m = m->next) {
+		for(size_t i = 0; i < JP_MAG_SIZE; i++) {
+			if(m->slots[i])
+				madvise(m->slots[i], sz, MADV_DONTNEED);
+		}
+	}
+}
+#else
+#define magazine_madvise(head, pid) ((void)0)
+#endif
 
 static void global_push_magazine(struct pool *p, struct magazine *head, struct magazine *tail)
 {
@@ -619,25 +653,25 @@ static void *pool_get(struct pool *p, size_t pid)
 	}
 	if(result == NULL) {
 		if(unlikely(p == g_pools_last)) {
-			/* Largest pool: mmap one block. */
+			/* Largest pool: mmap one block. Size is set by jp_alloc. */
 			size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
 			result = (union header *)os_alloc_pages(sz);
-			if(likely(result != NULL)) {
-				result->s.size = JP_ALLOC_POOL_COUNT - 1;
 #ifdef JP_ALLOC_DEBUG
+			if(likely(result != NULL)) {
 				result->s.magic = JP_UNSIZED_MAGIC;
 				result->s.state = JP_STATE_FREE;
-#endif
 			}
+#endif
 		} else {
-			/* Binary buddy: split from next-larger pool. */
+			/* Binary buddy: split from next-larger pool.
+			 * Use pid directly (not result->s.size - 1) since the
+			 * header may have been zeroed by madvise. Size is set
+			 * by jp_alloc. */
 			char *mem = (char *)pool_get(g_pools + pid + 1, pid + 1);
 			if(mem != NULL) {
 				result = (union header *)mem;
-				size_t sz = result->s.size - 1;
+				size_t sz = pid;
 				union header *spare = (union header *)(mem + (1U << sz));
-				result->s.size = sz;
-				spare->s.size = sz;
 #ifdef JP_ALLOC_DEBUG
 				spare->s.magic = JP_UNSIZED_MAGIC;
 				spare->s.state = JP_STATE_FREE;
@@ -765,6 +799,12 @@ void *jp_alloc(size_t size)
 	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
 		mem = pool_get(g_pools + pid, pid);
 		if(mem == NULL) return NULL;
+		/* Unconditionally set s.size — pool_get may return a block
+		 * whose header was zeroed by madvise (large blocks ≥ 4KB
+		 * returned to OS at EBR drain time). This single store
+		 * replaces the per-path writes that were previously in
+		 * pool_get's mmap and buddy-split branches. */
+		((union header *)mem)->s.size = pid;
 	} else {
 		size_t ps_mask = os_page_size() - 1;
 		size = (size + ps_mask) & ~ps_mask;
