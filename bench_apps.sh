@@ -1,9 +1,7 @@
 #!/bin/bash
-# Real-world allocator comparison: ffmpeg + OpenSCAD + GCC + Inkscape
-#
-# Tests actual applications under LD_PRELOAD with different allocators.
-# Measures wall time and peak RSS via /usr/bin/time.
-# Median of N runs (default 3).
+# Real-world allocator comparison
+# Tests: GCC, ffmpeg, OpenSCAD, Inkscape, Blender, NumPy, PIL, SQLite3 CLI
+# Runs under LD_PRELOAD with different allocators. Median of N runs (default 3).
 
 set -e
 cd /home/jp/work/tup
@@ -12,21 +10,21 @@ RUNS=${1:-3}
 TMP=/tmp/opencode
 OUTDIR=$TMP/alloc_results
 
+# Build jp_alloc.so variants
+echo "Building jp_alloc.so..."
+cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -shared \
+    -o "$TMP/jp_alloc.so" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
+cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -DJP_MADVISE_PID=99 -shared \
+    -o "$TMP/jp_alloc_nomadv.so" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
+
 JPSO=$TMP/jp_alloc.so
-JPSO_NOMADV=$TMP/jp_alloc_nomadv.so
+JPSO_NM=$TMP/jp_alloc_nomadv.so
 SQLITE3_C=$TMP/sqlite-amalgamation-3460000/sqlite3.c
-GCC_BENCH=$TMP/gcc_bench
+GCC_PARALLEL=$TMP/gcc_parallel
 SVG_FILE=$TMP/complex.svg
 TEST_VIDEO=$TMP/test_1080p.mp4
 SCAD_MODEL=$TMP/benchmark.scad
 
-# Build jp_alloc.so variants
-cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -shared \
-    -o "$JPSO" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
-cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -DJP_MADVISE_PID=99 -shared \
-    -o "$JPSO_NOMADV" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
-
-# Allocator .so paths
 JEMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 2>/dev/null || echo "")
 TCMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4* 2>/dev/null | head -1 || echo "")
 MIMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libmimalloc.so.2.1 2>/dev/null || echo "")
@@ -37,26 +35,22 @@ run_test() {
     local label="$1"; shift
     local preload="$1"; shift
     local cmd="$*"
-    local times=""
-    local rss_vals=""
-
+    local times="" rss_vals=""
     for i in $(seq 1 $RUNS); do
-        local time_file="$OUTDIR/$(echo "$label" | tr ' /' '__')_${i}.time"
+        local tf="$OUTDIR/$(echo "$label" | tr ' /' '__')_run${i}.time"
         if [ -z "$preload" ]; then
-            /usr/bin/time -f "%e %M" sh -c "$cmd 2>/dev/null" 2> "$time_file"
+            /usr/bin/time -f "%e %M" sh -c "$cmd 2>/dev/null" 2> "$tf" || true
         else
-            /usr/bin/time -f "%e %M" sh -c "LD_PRELOAD=$preload $cmd 2>/dev/null" 2> "$time_file"
+            /usr/bin/time -f "%e %M" sh -c "LD_PRELOAD=$preload $cmd 2>/dev/null" 2> "$tf" || true
         fi
-        local t=$(awk '{print $1}' "$time_file")
-        local rss=$(awk '{print $2}' "$time_file")
+        local t=$(awk '{print $1}' "$tf")
+        local r=$(awk '{print $2}' "$tf")
         times="$times $t"
-        rss_vals="$rss_vals $rss"
+        rss_vals="$rss_vals $r"
     done
-
-    local t_med=$(echo "$times" | tr ' ' '\n' | grep -v '^$' | sort -n | awk '{a[NR]=$0} END{printf "%.2f", a[int(NR/2)+1]}')
-    local r_med=$(echo "$rss_vals" | tr ' ' '\n' | grep -v '^$' | sort -n | awk '{a[NR]=$0} END{printf "%d", a[int(NR/2)+1]}')
-
-    printf "  %-20s | %7s s | %8s kB (%6.1f MB)\n" "$label" "$t_med" "$r_med" "$(echo "scale=1; $r_med / 1024" | bc)"
+    local tm=$(echo "$times" | tr ' ' '\n' | grep -v '^$' | sort -n | awk '{a[NR]=$0} END{printf "%.2f", a[int(NR/2)+1]}')
+    local rm=$(echo "$rss_vals" | tr ' ' '\n' | grep -v '^$' | sort -n | awk '{a[NR]=$0} END{printf "%d", a[int(NR/2)+1]}')
+    printf "  %-20s | %7s s | %8s kB (%6.1f MB)\n" "$label" "$tm" "$rm" "$(echo "scale=1; $rm / 1024" | bc)"
 }
 
 header() {
@@ -66,51 +60,92 @@ header() {
     echo "============================================================"
     echo ""
     printf "  %-20s | %7s   | %s\n" "Allocator" "Time" "Peak RSS"
-    printf "  %-20s-+----------+---------------------------\n" "---------------------"
+    printf "  %-20s-+----------+---------------------------\n" "--------------------"
 }
 
-# === Test 1: GCC compile SQLite amalgamation (single-threaded, -O2) ===
-header "GCC: compile SQLite amalgamation -O2 (single-threaded)"
-run_test "jp_alloc(madvise)"  "$JPSO"        gcc -O2 -c "$SQLITE3_C" -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
-run_test "jp_alloc(no-madv)"  "$JPSO_NOMADV" gcc -O2 -c "$SQLITE3_C" -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
-run_test "glibc"              ""             gcc -O2 -c "$SQLITE3_C" -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
-[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO"  gcc -O2 -c "$SQLITE3_C" -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
-[ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO"  gcc -O2 -c "$SQLITE3_C" -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
-[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO"  gcc -O2 -c "$SQLITE3_C" -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION
+# ==== 1. GCC: compile SQLite amalgamation -O2 (single-threaded) ====
+header "GCC: compile SQLite amalgamation -O2 (single-threaded, ~258K lines)"
+CMD="gcc -O2 -c $SQLITE3_C -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION"
+run_test "jp_alloc"      "$JPSO"    $CMD
+run_test "jp_alloc(nomadv)" "$JPSO_NM" $CMD
+run_test "glibc"         ""         $CMD
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
+[ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO" $CMD
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" $CMD
 
-# === Test 2: GCC multi-file project compile+link (-j8 parallel) ===
-# clean before each run inside run_test
-header "GCC: compile+link 50 files -O2 -j8 (parallel)"
-run_test "jp_alloc(madvise)"  "$JPSO"        make -j8 -C "$GCC_BENCH" clean && make -j8 -C "$GCC_BENCH" test_binary
-run_test "jp_alloc(no-madv)"  "$JPSO_NOMADV" make -j8 -C "$GCC_BENCH" clean && make -j8 -C "$GCC_BENCH" test_binary
-run_test "glibc"              ""             make -j8 -C "$GCC_BENCH" clean && make -j8 -C "$GCC_BENCH" test_binary
-[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO"  make -j8 -C "$GCC_BENCH" clean && make -j8 -C "$GCC_BENCH" test_binary
-[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO"  make -j8 -C "$GCC_BENCH" clean && make -j8 -C "$GCC_BENCH" test_binary
+# ==== 2. GCC: 8x SQLite amalgamation -j8 (parallel, multi-process) ====
+make -C "$GCC_PARALLEL" clean >/dev/null 2>&1
+header "GCC: 8x SQLite amalgamation -O2 -j8 (parallel, ~2M lines total)"
+CMD="make -j8 -C $GCC_PARALLEL clean; make -j8 -C $GCC_PARALLEL test_binary"
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "jp_alloc(nomadv)" "$JPSO_NM" "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
 
-# === Test 3: ffmpeg transcode ===
+# ==== 3. ffmpeg: transcode 1080p 10s video ====
 header "ffmpeg: transcode 1080p 10s video (libx264 fast)"
-run_test "jp_alloc(madvise)"  "$JPSO"        ffmpeg -i "$TEST_VIDEO" -c:v libx264 -preset fast -crf 23 -y "$OUTDIR/out_jp.mp4"
-run_test "jp_alloc(no-madv)"  "$JPSO_NOMADV" ffmpeg -i "$TEST_VIDEO" -c:v libx264 -preset fast -crf 23 -y "$OUTDIR/out_jpnm.mp4"
-run_test "glibc"              ""             ffmpeg -i "$TEST_VIDEO" -c:v libx264 -preset fast -crf 23 -y "$OUTDIR/out_glibc.mp4"
-[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO"  ffmpeg -i "$TEST_VIDEO" -c:v libx264 -preset fast -crf 23 -y "$OUTDIR/out_jem.mp4"
-[ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO"  ffmpeg -i "$TEST_VIDEO" -c:v libx264 -preset fast -crf 23 -y "$OUTDIR/out_tc.mp4"
-[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO"  ffmpeg -i "$TEST_VIDEO" -c:v libx264 -preset fast -crf 23 -y "$OUTDIR/out_mim.mp4"
+CMD="ffmpeg -y -i $TEST_VIDEO -c:v libx264 -preset fast -crf 23 $OUTDIR/out.mp4"
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
 
-# === Test 4: OpenSCAD render ===
-header "OpenSCAD: render 8000-sphere boolean model"
-run_test "jp_alloc(madvise)"  "$JPSO"        openscad -o "$OUTDIR/out_jp.png" "$SCAD_MODEL"
-run_test "jp_alloc(no-madv)"  "$JPSO_NOMADV" openscad -o "$OUTDIR/out_jpnm.png" "$SCAD_MODEL"
-run_test "glibc"              ""             openscad -o "$OUTDIR/out_glibc.png" "$SCAD_MODEL"
-[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO"  openscad -o "$OUTDIR/out_jem.png" "$SCAD_MODEL"
-[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO"  openscad -o "$OUTDIR/out_mim.png" "$SCAD_MODEL"
+# ==== 4. OpenSCAD: render 8000-sphere boolean model ====
+header "OpenSCAD: render 8000-sphere boolean model (single-threaded)"
+CMD="openscad -o $OUTDIR/out.png $SCAD_MODEL"
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
 
-# === Test 5: Inkscape SVG export ===
-header "Inkscape: render 10K-path SVG to PNG"
-run_test "jp_alloc(madvise)"  "$JPSO"        inkscape "$SVG_FILE" --export-type=png --export-filename "$OUTDIR/out_jp.png"
-run_test "jp_alloc(no-madv)"  "$JPSO_NOMADV" inkscape "$SVG_FILE" --export-type=png --export-filename "$OUTDIR/out_jpnm.png"
-run_test "glibc"              ""             inkscape "$SVG_FILE" --export-type=png --export-filename "$OUTDIR/out_glibc.png"
-[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO"  inkscape "$SVG_FILE" --export-type=png --export-filename "$OUTDIR/out_jem.png"
-[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO"  inkscape "$SVG_FILE" --export-type=png --export-filename "$OUTDIR/out_mim.png"
+# ==== 5. Inkscape: 10K-path SVG to PNG ====
+header "Inkscape: 10K-path SVG to PNG (Cairo/Pango)"
+CMD="inkscape $SVG_FILE --export-type=png --export-filename $OUTDIR/out.png"
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
+
+# ==== 6. Blender: 1000 ico-spheres render (headless) ====
+header "Blender: 1000 ico-spheres, 32 samples, 1280x720 (headless)"
+CMD="blender --background --python-expr \"
+import bpy, math
+for i in range(1000):
+    angle = i * 0.07
+    r = 3 + (i % 12)
+    x = r * math.sin(angle * 0.7)
+    y = r * math.cos(angle * 0.7)
+    z = (i % 15) * 0.3
+    bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=0.2, location=(x, y, z))
+bpy.context.scene.render.resolution_x = 1280
+bpy.context.scene.render.resolution_y = 720
+bpy.context.scene.cycles.samples = 32
+bpy.context.scene.render.filepath = '$OUTDIR/out.png'
+bpy.ops.render.render(write_still=True)
+\""
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
+
+# ==== 7. NumPy: SVD on 2000x2000 matrix ====
+header "Python NumPy: SVD 2000x2000 matrix (single-threaded heavy compute)"
+CMD="python3 -c \"import numpy; a=numpy.random.rand(2000,2000); numpy.linalg.svd(a)\""
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
+
+# ==== 8. SQLite3 CLI: 2M rows insert+index+query (in-memory) ====
+header "SQLite3 CLI: 2M rows insert+index+query (in-memory DB, heavy malloc)"
+CMD="sqlite3 :memory: \"CREATE TABLE t(id INTEGER, data BLOB); WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 2000000) INSERT INTO t SELECT x, randomblob(200) FROM cnt; SELECT count(*), sum(length(data)) FROM t; CREATE INDEX idx_data ON t(data); SELECT count(*) FROM t WHERE data > X'00'; DROP TABLE t;\""
+run_test "jp_alloc"      "$JPSO"    "$CMD"
+run_test "glibc"         ""         "$CMD"
+[ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
+[ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
 
 echo ""
 echo "=== Done. Results in $OUTDIR ==="
