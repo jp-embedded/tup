@@ -1,28 +1,26 @@
-/* jp_alloc - lock free memory allocator
+/* jp_alloc - lock-free memory allocator
  *
- * Originally from https://github.com/jp-embedded/jp_alloc
- * Relicensed to GPL-2.0-or-later for integration with tup.
+ * https://github.com/jp-embedded/jp_alloc
+ * GPL-2.0-or-later
  *
- * Modifications for tup:
- * - Converted from C++ to C11.
- * - Added jp_alloc_reset() for valgrind cleanup compatibility.
- * - Added Windows (VirtualAlloc) backend so jp_alloc works on all platforms.
- * - Added mremap for large reallocs on Linux.
- * - Dropped LD_PRELOAD shims (__libc_*) and C++ operator new/delete overrides.
- * - Replaced the 128-bit tagged-pointer freelist (cmpxchg16b on x86-64) with
- *   a 64-bit compare-and-swap freelist protected by a 3-epoch ring EBR plus a
- *   per-thread fixed-array cache (N=32 per size class). This removes the
- *   -mcx16 build requirement and reduces global-freelist contention. The
- *   EBR layer guarantees ABA-freedom: a popped block cannot reappear at the
- *   global freelist head until all threads that observed the prior head have
- *   left their pop critical section.
- * - The global freelist uses magazines (arrays of block pointers) instead of
- *   a linked list of blocks. Refill = pop one magazine + memcpy 16 pointers
- *   to the TLS cache. Flush = memcpy 16 pointers from the TLS cache into a
- *   magazine + CAS push. No dependent-load walks, no chain-building loops.
- *   Magazines come from a static global array (no mmap/malloc for magazines).
- * - Removed the headerless sized API. All allocation goes through the
- *   unified header'd malloc/free pool path.
+ * A lock-free, EBR-protected, thread-caching memory allocator written in
+ * pure C11. Features:
+ *
+ * - 64-bit CAS freelist with 3-epoch-ring EBR for ABA-freedom
+ * - Per-thread fixed-array cache (N=32 per size class) with no atomics
+ *   on the hot path
+ * - Magazine-based global freelist: refill = pop 1 magazine + memcpy 16
+ *   pointers; flush = memcpy 16 pointers + 1 CAS push. No dependent-
+ *   load walks, no in-band chain-building loops
+ * - Magazines allocated from the pool system (pool 8 = 256B blocks),
+ *   recycled via CAS-based free-list — no static arrays, no mmap
+ * - Binary buddy splitting with power-of-2 size classes (1B..8MB)
+ * - Demand paging: the 8MB pool reserve only commits touched pages
+ * - madvise(MADV_DONTNEED) at EBR drain time for blocks >= 4KB,
+ *   returning internal-fragmentation pages to the OS
+ * - Windows (VirtualAlloc) and POSIX (mmap) backends
+ * - mremap for large reallocs on Linux
+ * - Portable to 32-bit and 64-bit (GCC 4.7+, Clang 3.0+, MSVC 2015+)
  */
 
 /* mremap is Linux-only and requires _GNU_SOURCE before includes */
