@@ -54,8 +54,15 @@
  *   alloc-heavy: accumulate N_OUTSTANDING allocations before freeing any.
  *                Drains caches, exercises EBR refill from global freelist
  *                and exposes hit-rate as a function of N.
+ *   frag-stress: burst N small allocations across multiple tiers, free
+ *                them all, repeat M cycles. Exposes RSS-leak patterns
+ *                where freed small blocks can't be coalesced back up —
+ *                the jp_alloc2 redesign's primary motivation. Reports
+ *                peak RSS, final RSS, and RSS-per-cycle for A/B
+ *                comparison of jp_alloc vs jp_alloc2.
  *   free-heavy:  not implemented in this round; reserved for future. */
 static int g_mode_alloc_heavy = 0;
+static int g_mode_frag_stress = 0;
 
 /* ---- Sizes mimicking tup's hot structures ----
  *
@@ -223,6 +230,41 @@ static void alloc_heavy_drain(void)
 	ah_state.cnt = 0;
 }
 
+/* ---- frag-stress mode ----
+ *
+ * Burst N small allocations across multiple size classes (8B..256B),
+ * free them all, repeat M cycles. Designed to expose the RSS leak that
+ * jp_alloc's lack of upward coalescing produces: small freed blocks sit
+ * in magazines and never dissolve back into the larger blocks they were
+ * split from — so the 8M demand-paged reserve keeps the affected pages
+ * committed forever. jp_alloc2's coalescing lets freed small blocks
+ * dissolve up to madvise-eligible 4K+ regions, so RSS should drop back
+ * after the free phase.
+ *
+ * Sizes pick from the 8B..256B sub-block classes that map to tier 3
+ * (and to jp_alloc's pools 5..8): 24B (Python PyObject), 32B (tupid_list),
+ * 48B (edge), 80B (node), 128B (file_entry), 200B (SQLite B-tree page).
+ * The 24B and 200B are chosen to fall just outside power-of-2 boundaries
+ * to exercise internal-fragmentation waste. */
+
+#define FS_BURST       4096
+#define FS_CYCLES      32
+static const size_t FS_SIZES[] = {24, 32, 48, 80, 128, 200};
+#define FS_NSIZES ((int)(sizeof FS_SIZES / sizeof FS_SIZES[0]))
+
+static void frag_stress_burn(struct thread_state *t, uint64_t *rng)
+{
+	(void)t; (void)rng;
+	void *objs[FS_BURST];
+	for(int i = 0; i < FS_BURST; i++) {
+		size_t sz = FS_SIZES[i % FS_NSIZES];
+		objs[i] = malloc(sz);
+		if(objs[i]) memset(objs[i], 0, sz);
+	}
+	for(int i = 0; i < FS_BURST; i++)
+		free(objs[i]);
+}
+
 static void malloc_burn(struct thread_state *t, uint64_t *rng)
 {
 	(void)t;
@@ -265,6 +307,8 @@ static void *worker(void *arg)
 		for(int burst = 0; burst < OPS_PER_BURST; burst++) {
 			if(g_mode_alloc_heavy)
 				alloc_heavy_burn(t, &rng);
+			else if(g_mode_frag_stress)
+				frag_stress_burn(t, &rng);
 			else
 				graph_burn(t, &rng);
 			t->ops_done++;
@@ -343,6 +387,7 @@ int main(int argc, char **argv)
 		g_seed = (uint64_t)strtoull(e, NULL, 0);
 	if((e = getenv("JPBENCH_MODE")) != NULL) {
 		if(strcmp(e, "alloc-heavy") == 0) g_mode_alloc_heavy = 1;
+		else if(strcmp(e, "frag-stress") == 0) g_mode_frag_stress = 1;
 		/* "balanced" or any other value: graph_burn (default) */
 	}
 	if((e = getenv("JPBENCH_SECONDS")) != NULL && *e) {
@@ -354,7 +399,8 @@ int main(int argc, char **argv)
 
 	printf("jp_alloc bench: threads=%ld ops/thread=%ld mode=%s%s%s\n",
 		g_total_threads, g_ops_per_thread,
-		g_mode_alloc_heavy ? "alloc-heavy" : "balanced",
+		g_mode_alloc_heavy ? "alloc-heavy" :
+		(g_mode_frag_stress ? "frag-stress" : "balanced"),
 		g_run_timed ? " timed=" : "",
 		g_run_timed ? getenv("JPBENCH_SECONDS") : "");
 #ifdef JP_ALLOC_DEBUG
