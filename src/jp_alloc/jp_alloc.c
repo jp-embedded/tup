@@ -61,10 +61,6 @@
 
 /* ---- Portability fallbacks ---- */
 
-#ifndef JP_ALLOC_POOL_COUNT
-#define JP_ALLOC_POOL_COUNT 24  /* Gives pools of 1 - 8M */
-#endif
-
 #ifndef JP_CACHELINE
 #define JP_CACHELINE 64
 #endif
@@ -80,14 +76,146 @@
 #endif
 #endif
 
+#ifndef JP_ALLOC_INTERMEDIATE_K
+#define JP_ALLOC_INTERMEDIATE_K 0
+#endif
+
+/* ---- Pool table: power-of-2 + intermediate size classes ----
+ *
+ * K=0: pure power-of-2 (24 pools, 1..8M).
+ * K=4: 39 pools. Intermediate = 2^i * 5. malloc(128)->160B (0 waste vs 256B).
+ * K=6: 37 pools. Intermediate = 2^i * 21.
+ * Intermediates with small < sizeof(union header) are skipped.
+ * Identity: 1*small + 3*intermediate = split_from (pow2).
+ */
+
+struct pool_info {
+	uint32_t size;
+	uint8_t  is_pow2;
+	uint32_t split_from;
+	uint32_t small_size;
+};
+
+#if JP_ALLOC_INTERMEDIATE_K == 0
+static const struct pool_info g_pools[] = {
+	{1u,1,0,0},{2u,1,0,0},{4u,1,0,0},{8u,1,0,0},{16u,1,0,0},{32u,1,0,0},
+	{64u,1,0,0},{128u,1,0,0},{256u,1,0,0},{512u,1,0,0},{1024u,1,0,0},
+	{2048u,1,0,0},{4096u,1,0,0},{8192u,1,0,0},{16384u,1,0,0},{32768u,1,0,0},
+	{65536u,1,0,0},{131072u,1,0,0},{262144u,1,0,0},{524288u,1,0,0},
+	{1048576u,1,0,0},{2097152u,1,0,0},{4194304u,1,0,0},{8388608u,1,0,0},
+};
+#elif JP_ALLOC_INTERMEDIATE_K == 4
+static const struct pool_info g_pools[] = {
+	{1u,1,0,0},{2u,1,0,0},{4u,1,0,0},{8u,1,0,0},{16u,1,0,0},{32u,1,0,0},
+	{64u,1,0,0},{128u,1,0,0},
+	{160u,0,512u,32u},
+	{256u,1,0,0},
+	{320u,0,1024u,64u},
+	{512u,1,0,0},
+	{640u,0,2048u,128u},
+	{1024u,1,0,0},
+	{1280u,0,4096u,256u},
+	{2048u,1,0,0},
+	{2560u,0,8192u,512u},
+	{4096u,1,0,0},
+	{5120u,0,16384u,1024u},
+	{8192u,1,0,0},
+	{10240u,0,32768u,2048u},
+	{16384u,1,0,0},
+	{20480u,0,65536u,4096u},
+	{32768u,1,0,0},
+	{40960u,0,131072u,8192u},
+	{65536u,1,0,0},
+	{81920u,0,262144u,16384u},
+	{131072u,1,0,0},
+	{163840u,0,524288u,32768u},
+	{262144u,1,0,0},
+	{327680u,0,1048576u,65536u},
+	{524288u,1,0,0},
+	{655360u,0,2097152u,131072u},
+	{1048576u,1,0,0},
+	{1310720u,0,4194304u,262144u},
+	{2097152u,1,0,0},
+	{2621440u,0,8388608u,524288u},
+	{4194304u,1,0,0},
+	{8388608u,1,0,0},
+};
+#elif JP_ALLOC_INTERMEDIATE_K == 6
+static const struct pool_info g_pools[] = {
+	{1u,1,0,0},{2u,1,0,0},{4u,1,0,0},{8u,1,0,0},{16u,1,0,0},{32u,1,0,0},
+	{64u,1,0,0},{128u,1,0,0},{256u,1,0,0},{512u,1,0,0},
+	{672u,0,2048u,32u},
+	{1024u,1,0,0},
+	{1344u,0,4096u,64u},
+	{2048u,1,0,0},
+	{2688u,0,8192u,128u},
+	{4096u,1,0,0},
+	{5376u,0,16384u,256u},
+	{8192u,1,0,0},
+	{10752u,0,32768u,512u},
+	{16384u,1,0,0},
+	{21504u,0,65536u,1024u},
+	{32768u,1,0,0},
+	{43008u,0,131072u,2048u},
+	{65536u,1,0,0},
+	{86016u,0,262144u,4096u},
+	{131072u,1,0,0},
+	{172032u,0,524288u,8192u},
+	{262144u,1,0,0},
+	{344064u,0,1048576u,16384u},
+	{524288u,1,0,0},
+	{688128u,0,2097152u,32768u},
+	{1048576u,1,0,0},
+	{1376256u,0,4194304u,65536u},
+	{2097152u,1,0,0},
+	{2752512u,0,8388608u,131072u},
+	{4194304u,1,0,0},
+	{8388608u,1,0,0},
+};
+#else
+#error "JP_ALLOC_INTERMEDIATE_K must be 0, 4, or 6"
+#endif
+
+#define JP_POOL_COUNT (sizeof(g_pools) / sizeof(g_pools[0]))
+
+static inline size_t pool_id_by_size(size_t size)
+{
+	for(size_t pid = 0; pid < JP_POOL_COUNT; pid++)
+		if(g_pools[pid].size >= size) return pid;
+	return JP_POOL_COUNT;
+}
+
+#define JP_PID_LUT_SIZE 257
+static uint8_t g_pid_lut[JP_PID_LUT_SIZE];
+static int g_pid_lut_done = 0;
+static void jp_pid_lut_init(void)
+{
+	for(size_t pid = 0; pid < JP_POOL_COUNT; pid++) {
+		size_t sz = g_pools[pid].size;
+		size_t start = (pid == 0) ? 0 : g_pools[pid-1].size + 1;
+		for(size_t s = start; s <= sz && s < JP_PID_LUT_SIZE; s++)
+			g_pid_lut[s] = (uint8_t)pid;
+	}
+	g_pid_lut[0] = 0;
+	g_pid_lut_done = 1;
+}
+
 /* madvise(MADV_DONTNEED) returns freed large-block pages to the OS,
  * reducing RSS. Only applies to pools where blocks are page-aligned
  * and span whole pages (pid >= JP_MADVISE_PID). Smaller blocks share
  * pages with other blocks and can't be madvise'd individually.
  * Disabled on Windows (no madvise). */
-#ifndef JP_MADVISE_PID
-#define JP_MADVISE_PID 12  /* pool 12 = 4KB blocks — first page-aligned pool */
-#endif
+/* First page-aligned pool (>= 4K). Dynamic — depends on pool table. */
+static size_t jp_madvise_pid_val(void)
+{
+	static size_t cached = 0;
+	if(!cached) {
+		for(size_t pid = 0; pid < JP_POOL_COUNT; pid++)
+			if(g_pools[pid].size >= 4096) { cached = pid; break; }
+	}
+	return cached;
+}
+#define JP_MADVISE_PID jp_madvise_pid_val()
 
 /* __builtin_clzll fallback for MSVC */
 #ifdef _MSC_VER
@@ -191,13 +319,13 @@ static void os_free_pages(void *mem, size_t size)
 /* ---- Statistics (compiled in with -DJP_ALLOC_STATS) ---- */
 #ifdef JP_ALLOC_STATS
 #include <stdio.h>
-static _Atomic(size_t) g_live_blocks[JP_ALLOC_POOL_COUNT];
-static _Atomic(size_t) g_alloc_count[JP_ALLOC_POOL_COUNT];
-static _Atomic(size_t) g_free_count[JP_ALLOC_POOL_COUNT];
-static _Atomic(size_t) g_mmap_count[JP_ALLOC_POOL_COUNT];
-static _Atomic(size_t) g_mmap_bytes[JP_ALLOC_POOL_COUNT];
-static _Atomic(size_t) g_madvise_count[JP_ALLOC_POOL_COUNT];
-static _Atomic(size_t) g_madvise_bytes[JP_ALLOC_POOL_COUNT];
+static _Atomic(size_t) g_live_blocks[JP_POOL_COUNT];
+static _Atomic(size_t) g_alloc_count[JP_POOL_COUNT];
+static _Atomic(size_t) g_free_count[JP_POOL_COUNT];
+static _Atomic(size_t) g_mmap_count[JP_POOL_COUNT];
+static _Atomic(size_t) g_mmap_bytes[JP_POOL_COUNT];
+static _Atomic(size_t) g_madvise_count[JP_POOL_COUNT];
+static _Atomic(size_t) g_madvise_bytes[JP_POOL_COUNT];
 static _Atomic(size_t) g_direct_mmap_bytes;
 static _Atomic(size_t) g_direct_live_bytes;
 static _Atomic(size_t) g_page_madvise_count;
@@ -340,12 +468,12 @@ union header {
 
 #if JP_ALLOC_PAGE_COUNTER
 struct tls_state {
-	union header *freelist[JP_ALLOC_POOL_COUNT];
+	union header *freelist[JP_POOL_COUNT];
 	struct jp_pc_pending pc_pending;
 };
 #else
 struct tls_state {
-	union header *freelist[JP_ALLOC_POOL_COUNT];
+	union header *freelist[JP_POOL_COUNT];
 };
 #endif
 
@@ -422,12 +550,11 @@ static void tls_destructor(void *p)
 
 /* ---- Pool operations (per-thread, zero atomics) ---- */
 
-static size_t pool_id(size_t size)
+static inline size_t pool_id(size_t size)
 {
-	if(likely(size > 0)) {
-		return 64 - jp_clzll(size - 1);
-	}
-	return 0;
+	if(unlikely(!g_pid_lut_done)) jp_pid_lut_init();
+	if(likely(size <= 256)) return g_pid_lut[size];
+	return pool_id_by_size(size);
 }
 
 static int is_pow2(size_t n)
@@ -435,9 +562,10 @@ static int is_pow2(size_t n)
 	return (n & (n - 1)) == 0;
 }
 
-/* pool_get: pop from this thread's freelist[pid]. If empty, buddy-split
- * from freelist[pid+1] (recursive, same thread, zero atomics). At the
- * largest pool, mmap a new 8M-aligned region with counter table. */
+/* pool_get: pop from freelist[pid]. If empty, split from a larger pool.
+ * For power-of-2 pools: binary buddy split (half + half).
+ * For intermediate pools: asymmetric split from next pow2 pool
+ * (1*small + 3*intermediate = pow2). */
 static union header *pool_get(size_t pid)
 {
 	/* Fast path: pop from freelist. */
@@ -446,23 +574,47 @@ static union header *pool_get(size_t pid)
 		tls.freelist[pid] = h->s.next;
 		return h;
 	}
-	/* Empty: buddy-split from next larger pool. */
-	if(likely(pid < JP_ALLOC_POOL_COUNT - 1)) {
-		union header *big = pool_get(pid + 1);
-		if(!big) return NULL;
-		size_t sz = pid;
-		union header *spare = (union header *)((char *)big + (1U << sz));
-#ifdef JP_ALLOC_DEBUG
-		spare->s.magic = JP_UNSIZED_MAGIC;
-		spare->s.state = JP_STATE_FREE;
-#endif
-		/* Push spare to this thread's freelist[pid]. */
-		spare->s.next = tls.freelist[pid];
-		tls.freelist[pid] = spare;
-		return big;
+	/* Empty: split from a larger pool. */
+	if(likely(pid < JP_POOL_COUNT - 1)) {
+		if(g_pools[pid].is_pow2) {
+			/* Binary buddy: split next pow2 pool into two halves.
+			 * Skip intermediate pools — they're not 2x the child. */
+			size_t next_pid = pid + 1;
+			while(next_pid < JP_POOL_COUNT && !g_pools[next_pid].is_pow2)
+				next_pid++;
+			union header *big = pool_get(next_pid);
+			if(!big) return NULL;
+			size_t sz = g_pools[pid].size;
+			union header *spare = (union header *)((char *)big + sz);
+			spare->s.next = tls.freelist[pid];
+			tls.freelist[pid] = spare;
+			return big;
+		} else {
+			/* Asymmetric: carve from next pow2 pool.
+			 * 1*small + 3*intermediate = pow2. */
+			size_t pow2_pid = pool_id_by_size(g_pools[pid].split_from);
+			union header *big = pool_get(pow2_pid);
+			if(!big) return NULL;
+			size_t inter_sz = g_pools[pid].size;
+			size_t small_sz = g_pools[pid].small_size;
+			char *p = (char *)big;
+			for(int i = 0; i < 3; i++) {
+				union header *h = (union header *)p;
+				h->s.next = tls.freelist[pid];
+				tls.freelist[pid] = h;
+				p += inter_sz;
+			}
+			size_t small_pid = pool_id_by_size(small_sz);
+			union header *small_h = (union header *)p;
+			small_h->s.next = tls.freelist[small_pid];
+			tls.freelist[small_pid] = small_h;
+			union header *h = tls.freelist[pid];
+			tls.freelist[pid] = h->s.next;
+			return h;
+		}
 	}
 	/* Largest pool: mmap a new 8M-aligned region. */
-	size_t sz = 1U << (JP_ALLOC_POOL_COUNT - 1);
+	size_t sz = g_pools[pid].size;
 #if JP_ALLOC_PAGE_COUNTER
 	union header *h = (union header *)os_alloc_8m_region_counter();
 #else
@@ -525,8 +677,8 @@ static void *alloc_pages_aligned(size_t alignment, size_t size)
 size_t jp_good_size(size_t size)
 {
 	size_t pid = pool_id(size);
-	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
-		size = 1U << pid;
+	if(likely(pid < JP_POOL_COUNT)) {
+		size = g_pools[pid].size;
 	} else {
 		size_t ps_mask = os_page_size() - 1;
 		size = (size + ps_mask) & ~ps_mask;
@@ -563,8 +715,8 @@ static void jp_alloc_stats_dump(void)
 	fprintf(f, "  %-4s %-10s %-12s %-12s %-12s %-14s %-14s %-14s %-14s\n",
 		"pid", "block_sz", "live", "allocs", "frees",
 		"mmap_bytes", "freelist", "madvise_cnt", "live_bytes");
-	for(size_t pid = 0; pid < JP_ALLOC_POOL_COUNT; pid++) {
-		size_t block_sz = 1U << pid;
+	for(size_t pid = 0; pid < JP_POOL_COUNT; pid++) {
+		size_t block_sz = g_pools[pid].size;
 		size_t live = __atomic_load_n(&g_live_blocks[pid], __ATOMIC_RELAXED);
 		size_t alloc = __atomic_load_n(&g_alloc_count[pid], __ATOMIC_RELAXED);
 		size_t free = __atomic_load_n(&g_free_count[pid], __ATOMIC_RELAXED);
@@ -628,7 +780,7 @@ void jp_free(void *mem)
 	h->s.state = JP_STATE_FREE;
 #endif
 	size_t size = h->s.size;
-	if(likely(size < JP_ALLOC_POOL_COUNT)) {
+	if(likely(size < JP_POOL_COUNT)) {
 		JP_STAT_FREE(size);
 		JP_STAT_DEAD(size);
 		/* Per-4K-page user-held counter: dec-and-test before pool_put. */
@@ -652,7 +804,7 @@ void *jp_alloc(size_t size)
 	size += sizeof(union header);
 	void *mem;
 	size_t pid = pool_id(size);
-	if(likely(pid < JP_ALLOC_POOL_COUNT)) {
+	if(likely(pid < JP_POOL_COUNT)) {
 		tls_register();
 		union header *h = pool_get(pid);
 		if(h == NULL) return NULL;
@@ -726,14 +878,14 @@ void *jp_realloc(void *mem, size_t new_size)
 			 mem, (unsigned long long)h->s.state);
 #endif
 		size = h->s.size;
-		if(likely(size < JP_ALLOC_POOL_COUNT)) size = 1U << size;
+		if(likely(size < JP_POOL_COUNT)) size = g_pools[size].size;
 		size -= sizeof(union header);
 	}
 	if(new_size > size) {
 		if(mem != NULL) {
 			union header *h = (union header *)mem - 1;
 			size_t hdr_size = h->s.size;
-			if(hdr_size >= JP_ALLOC_POOL_COUNT) {
+			if(hdr_size >= JP_POOL_COUNT) {
 				size_t pre_padding = (size_t)mem & (os_page_size() - 1);
 				char *base = (char *)h + pre_padding;
 #ifdef __linux__
@@ -788,7 +940,7 @@ size_t malloc_usable_size(void *ptr)
 {
 	union header *h = (union header *)ptr - 1;
 	size_t size = h->s.size;
-	if(likely(size < JP_ALLOC_POOL_COUNT)) size = 1U << size;
+	if(likely(size < JP_POOL_COUNT)) size = g_pools[size].size;
 	return size - sizeof(union header);
 }
 
