@@ -77,7 +77,7 @@
 #endif
 
 #ifndef JP_ALLOC_INTERMEDIATE_K
-#define JP_ALLOC_INTERMEDIATE_K 0
+#define JP_ALLOC_INTERMEDIATE_K 4
 #endif
 
 /* ---- Pool table: power-of-2 + intermediate size classes ----
