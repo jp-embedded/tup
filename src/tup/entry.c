@@ -536,7 +536,6 @@ static struct tup_entry *new_entry(tupid_t tupid, tupid_t dt,
 			return NULL;
 		if(set_string(&tent->flags, &tent->flagslen, flags, flagslen) < 0)
 			return NULL;
-		tent->re = NULL;
 	}
 	RB_INIT(&tent->entries);
 

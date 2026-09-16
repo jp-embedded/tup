@@ -1,5 +1,40 @@
 # Real-world allocator benchmark — full results
 
+## Restricted K=4 follow-up (2026-09-16)
+
+Intermediate pools are now limited to asymmetric splits whose parent is at
+most 4KB. K=4 therefore adds 160B, 320B, 640B, and 1280B classes while larger
+allocations continue to use power-of-two pools. This keeps each asymmetric
+split within one page and avoids conflicts with per-page reclamation.
+
+The table compares the power-of-two K=0 configuration with restricted K=4.
+Application results are medians of three runs except Blender, GCC -j8, and
+NumPy, which were run once. Peak RSS is from `/usr/bin/time`.
+
+| Application | K=0 time/RSS | K=4 time/RSS | K=4 change |
+|---|---|---|---|
+| tup clean parse, 3 variants | 62.08s / 1017MB | 60.15s / 683MB | 3.1% faster, 32.9% less RSS |
+| GCC SQLite -O2 | 13.40s / 384MB | 13.42s / 385MB | parity |
+| GCC 8x SQLite -j8 | 14.81s / 362MB | 14.73s / 362MB | parity |
+| ffmpeg 1080p | 1.37s / 2162MB | 1.35s / 2162MB | parity |
+| OpenSCAD 8K spheres | 0.36s / 157MB | 0.35s / 152MB | 2.8% faster, 3.3% less RSS |
+| Inkscape 10K SVG | 0.64s / 224MB | 0.64s / 221MB | same time, 1.5% less RSS |
+| Blender 1000 spheres | 60.80s / 28085MB | 52.98s / 26765MB | 12.9% faster, 4.7% less RSS |
+| NumPy SVD 2000² | 17.30s / 300MB | 17.26s / 299MB | parity |
+| SQLite3 CLI 2M rows | 5.85s / 3320MB | 5.57s / 2765MB | 4.8% faster, 16.7% less RSS |
+
+K=4 is neutral or better than K=0 in every measured workload and provides a
+large reduction for tup itself, so it is now the default. It does not solve
+the Blender/Python small-object pathology because the first added class is
+160B; finer classes below 128B would require a different split scheme.
+
+A clean tup parse with restricted K=4 and `JP_ALLOC_PAGE_COUNTER=0` took
+56.87s with 496836KB peak RSS, versus the normal K=4 median of 60.15s and
+699372KB. The page-counter/reclamation path therefore costs about 5.5% on
+this workload and, unexpectedly, increases rather than decreases peak RSS.
+The 8MB-aligned region layout and deferred page queue should be profiled
+before treating page reclamation as a memory optimization for tup.
+
 Test machine: Intel Core i5-8250U (4 cores / 8 threads), 12 GB RAM,
 Linux x86_64. All allocators built with `-O2` and tested via `LD_PRELOAD`.
 Median of 3 runs unless noted. Run `bench_apps.sh` to reproduce.

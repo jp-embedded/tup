@@ -20,7 +20,7 @@
 # jemalloc, tcmalloc, mimalloc — each only if its .so is installed on the host.
 
 set -e
-cd /home/jp/work/tup
+cd "$(dirname "$0")"
 
 RUNS=${1:-3}
 TMP=/tmp/opencode
@@ -127,15 +127,17 @@ fi
 # Build jp_alloc.so variants
 echo "Building jp_alloc.so..."
 cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -shared \
-    -o "$TMP/jp_alloc.so" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
-cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -DJP_MADVISE_PID=99 -shared \
-    -o "$TMP/jp_alloc_nomadv.so" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
+    -DJP_ALLOC_INTERMEDIATE_K=0 \
+    -o "$TMP/jp_alloc_k0.so" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
+cc -O2 -std=c11 -fpic -DJP_ALLOC_IMPLEMENTATION -shared \
+    -DJP_ALLOC_INTERMEDIATE_K=4 \
+    -o "$TMP/jp_alloc_k4.so" src/jp_alloc/jp_alloc.c -lpthread -lm 2>/dev/null
 
-JPSO=$TMP/jp_alloc.so
-JPSO_NM=$TMP/jp_alloc_nomadv.so
+JPSO_K0=$TMP/jp_alloc_k0.so
+JPSO_K4=$TMP/jp_alloc_k4.so
 
 JEMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 2>/dev/null || echo "")
-TCMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4* 2>/dev/null | head -1 || echo "")
+TCMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4* /usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4t64* 2>/dev/null | head -1 || echo "")
 MIMALLOC_SO=$(ls /usr/lib/x86_64-linux-gnu/libmimalloc.so.2.1 2>/dev/null || echo "")
 
 run_test() {
@@ -174,8 +176,8 @@ header() {
 if app_enabled gcc1 && [ -n "$SQLITE3_C" ]; then
 header "GCC: compile SQLite amalgamation -O2 (single-threaded, ~258K lines)"
 CMD="gcc -O2 -c $SQLITE3_C -o /dev/null -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION"
-run_test "jp_alloc"      "$JPSO"    $CMD
-run_test "jp_alloc(nomadv)" "$JPSO_NM" $CMD
+    run_test "jp_alloc K=0"  "$JPSO_K0" $CMD
+    run_test "jp_alloc K=4"  "$JPSO_K4" $CMD
 run_test "glibc"         ""         $CMD
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
 [ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO" $CMD
@@ -187,8 +189,8 @@ if app_enabled gcc8 && [ -n "$GCC_PARALLEL" ]; then
 make -C "$GCC_PARALLEL" clean >/dev/null 2>&1
 header "GCC: 8x SQLite amalgamation -O2 -j8 (parallel, ~2M lines total)"
 CMD="make -j8 -C $GCC_PARALLEL clean; make -j8 -C $GCC_PARALLEL test_binary"
-run_test "jp_alloc"      "$JPSO"    "$CMD"
-run_test "jp_alloc(nomadv)" "$JPSO_NM" "$CMD"
+    run_test "jp_alloc K=0"  "$JPSO_K0" "$CMD"
+    run_test "jp_alloc K=4"  "$JPSO_K4" "$CMD"
 run_test "glibc"         ""         "$CMD"
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
 [ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO" "$CMD"
@@ -199,7 +201,8 @@ fi
 if app_enabled ffmpeg && [ -n "$TEST_VIDEO" ]; then
 header "ffmpeg: transcode 1080p 10s video (libx264 fast)"
 CMD="ffmpeg -y -i $TEST_VIDEO -c:v libx264 -preset fast -crf 23 $OUTDIR/out.mp4"
-run_test "jp_alloc"      "$JPSO"    $CMD
+    run_test "jp_alloc K=0"  "$JPSO_K0" $CMD
+    run_test "jp_alloc K=4"  "$JPSO_K4" $CMD
 run_test "glibc"         ""         $CMD
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
 [ -n "$TCMALLOC_SO" ]  && run_test "tcmalloc"  "$TCMALLOC_SO" $CMD
@@ -210,7 +213,8 @@ fi
 if app_enabled openscad && [ -n "$SCAD_MODEL" ]; then
 header "OpenSCAD: render 8000-sphere boolean model (single-threaded)"
 CMD="openscad -o $OUTDIR/out.png $SCAD_MODEL"
-run_test "jp_alloc"      "$JPSO"    $CMD
+    run_test "jp_alloc K=0"  "$JPSO_K0" $CMD
+    run_test "jp_alloc K=4"  "$JPSO_K4" $CMD
 run_test "glibc"         ""         $CMD
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
 [ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" $CMD
@@ -220,7 +224,8 @@ fi
 if app_enabled inkscape && [ -n "$SVG_FILE" ]; then
 header "Inkscape: 10K-path SVG to PNG (Cairo/Pango)"
 CMD="inkscape $SVG_FILE --export-type=png --export-filename=$OUTDIR/out.png"
-run_test "jp_alloc"      "$JPSO"    $CMD
+    run_test "jp_alloc K=0"  "$JPSO_K0" $CMD
+    run_test "jp_alloc K=4"  "$JPSO_K4" $CMD
 run_test "glibc"         ""         $CMD
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
 [ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" $CMD
@@ -244,7 +249,8 @@ bpy.context.scene.cycles.samples = 32
 bpy.context.scene.render.filepath = '$OUTDIR/out.png'
 bpy.ops.render.render(write_still=True)
 \""
-run_test "jp_alloc"      "$JPSO"    "$CMD"
+    run_test "jp_alloc K=0"  "$JPSO_K0" "$CMD"
+    run_test "jp_alloc K=4"  "$JPSO_K4" "$CMD"
 run_test "glibc"         ""         "$CMD"
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" "$CMD"
 [ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" "$CMD"
@@ -254,7 +260,8 @@ fi
 if app_enabled numpy && python3 -c "import numpy" 2>/dev/null; then
 header "Python NumPy: SVD 2000x2000 matrix (single-threaded heavy compute)"
 CMD="python3 -c \"import numpy; a=numpy.random.rand(2000,2000); numpy.linalg.svd(a)\""
-run_test "jp_alloc"      "$JPSO"    $CMD
+    run_test "jp_alloc K=0"  "$JPSO_K0" $CMD
+    run_test "jp_alloc K=4"  "$JPSO_K4" $CMD
 run_test "glibc"         ""         $CMD
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
 [ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" $CMD
@@ -264,7 +271,8 @@ fi
 if app_enabled sqlite && command -v sqlite3 >/dev/null 2>&1; then
 header "SQLite3 CLI: 2M rows insert+index+query (in-memory DB, heavy malloc)"
 CMD="sqlite3 :memory: \"CREATE TABLE t(id INTEGER, data BLOB); WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 2000000) INSERT INTO t SELECT x, randomblob(200) FROM cnt; SELECT count(*), sum(length(data)) FROM t; CREATE INDEX idx_data ON t(data); SELECT count(*) FROM t WHERE data > X'00'; DROP TABLE t;\""
-run_test "jp_alloc"      "$JPSO"    $CMD
+    run_test "jp_alloc K=0"  "$JPSO_K0" $CMD
+    run_test "jp_alloc K=4"  "$JPSO_K4" $CMD
 run_test "glibc"         ""         $CMD
 [ -n "$JEMALLOC_SO" ]  && run_test "jemalloc"  "$JEMALLOC_SO" $CMD
 [ -n "$MIMALLOC_SO" ]  && run_test "mimalloc"  "$MIMALLOC_SO" $CMD

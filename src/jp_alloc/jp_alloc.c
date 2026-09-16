@@ -83,9 +83,11 @@
 /* ---- Pool table: power-of-2 + intermediate size classes ----
  *
  * K=0: pure power-of-2 (24 pools, 1..8M).
- * K=4: 39 pools. Intermediate = 2^i * 5. malloc(128)->160B (0 waste vs 256B).
- * K=6: 37 pools. Intermediate = 2^i * 21.
+ * K=4: 28 pools. Intermediate = 2^i * 5 through the 4K parent.
+ * K=6: 26 pools. Intermediate = 2^i * 21 through the 4K parent.
  * Intermediates with small < sizeof(union header) are skipped.
+ * Intermediates with a parent above 4K are skipped so every asymmetric
+ * split, and every resulting block, stays within one page.
  * Identity: 1*small + 3*intermediate = split_from (pow2).
  */
 
@@ -116,27 +118,16 @@ static const struct pool_info g_pools[] = {
 	{1024u,1,0,0},
 	{1280u,0,4096u,256u},
 	{2048u,1,0,0},
-	{2560u,0,8192u,512u},
 	{4096u,1,0,0},
-	{5120u,0,16384u,1024u},
 	{8192u,1,0,0},
-	{10240u,0,32768u,2048u},
 	{16384u,1,0,0},
-	{20480u,0,65536u,4096u},
 	{32768u,1,0,0},
-	{40960u,0,131072u,8192u},
 	{65536u,1,0,0},
-	{81920u,0,262144u,16384u},
 	{131072u,1,0,0},
-	{163840u,0,524288u,32768u},
 	{262144u,1,0,0},
-	{327680u,0,1048576u,65536u},
 	{524288u,1,0,0},
-	{655360u,0,2097152u,131072u},
 	{1048576u,1,0,0},
-	{1310720u,0,4194304u,262144u},
 	{2097152u,1,0,0},
-	{2621440u,0,8388608u,524288u},
 	{4194304u,1,0,0},
 	{8388608u,1,0,0},
 };
@@ -148,27 +139,16 @@ static const struct pool_info g_pools[] = {
 	{1024u,1,0,0},
 	{1344u,0,4096u,64u},
 	{2048u,1,0,0},
-	{2688u,0,8192u,128u},
 	{4096u,1,0,0},
-	{5376u,0,16384u,256u},
 	{8192u,1,0,0},
-	{10752u,0,32768u,512u},
 	{16384u,1,0,0},
-	{21504u,0,65536u,1024u},
 	{32768u,1,0,0},
-	{43008u,0,131072u,2048u},
 	{65536u,1,0,0},
-	{86016u,0,262144u,4096u},
 	{131072u,1,0,0},
-	{172032u,0,524288u,8192u},
 	{262144u,1,0,0},
-	{344064u,0,1048576u,16384u},
 	{524288u,1,0,0},
-	{688128u,0,2097152u,32768u},
 	{1048576u,1,0,0},
-	{1376256u,0,4194304u,65536u},
 	{2097152u,1,0,0},
-	{2752512u,0,8388608u,131072u},
 	{4194304u,1,0,0},
 	{8388608u,1,0,0},
 };
