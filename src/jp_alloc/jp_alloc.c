@@ -8,19 +8,15 @@
  * - Per-thread power-of-2 pools with binary buddy splitting (1B..8MB)
  * - Zero atomics on the hot path: alloc = freelist pop, free = freelist push
  * - No magazines, no EBR, no CAS, no global pools, no TLS cache array
- * - Per-4K-page user-held counter with deferred madvise(MADV_DONTNEED):
- *   when all user-held blocks on a 4K page are freed, the page returns
- *   to the OS. Sub-4K block fragmentation no longer leaks RSS.
- * - 8M-aligned regions (mmap 16M + trim) with a 4K counter-table page
+ * - Optional experimental per-4K-page reclamation (disabled by default)
  * - Windows (VirtualAlloc) and POSIX (mmap) backends
  * - mremap for large reallocs on Linux
  * - Portable to 32-bit and 64-bit (GCC 4.7+, Clang 3.0+, MSVC 2015+)
  *
  * Cross-thread free: when Thread B frees a block that Thread A allocated,
  * B pushes it onto B's own freelist. B can hand it out later. The
- * per-4K-page counter (in A's region's counter table) is decremented
- * atomically by B. When it hits 0, B schedules madvise for that 4K page
- * (in A's region). Any thread can madvise any virtual address.
+ * optional per-4K-page counter (in A's region's counter table) is
+ * decremented atomically by B.
  *
  * Cross-thread memory flow (A allocates, B frees) can cause A's freelist
  * to drain while B accumulates free blocks. Step 1 ignores this — A
@@ -158,26 +154,40 @@ static const struct pool_info g_pools[] = {
 
 #define JP_POOL_COUNT (sizeof(g_pools) / sizeof(g_pools[0]))
 
+/* __builtin_clzll fallback for MSVC */
+#ifdef _MSC_VER
+#include <intrin.h>
+static inline int jp_clzll(unsigned long long x)
+{
+	unsigned long r;
+	_BitScanReverse64(&r, x);
+	return 63 - (int)r;
+}
+#else
+#define jp_clzll(x) __builtin_clzll(x)
+#endif
+
 static inline size_t pool_id_by_size(size_t size)
 {
-	for(size_t pid = 0; pid < JP_POOL_COUNT; pid++)
-		if(g_pools[pid].size >= size) return pid;
-	return JP_POOL_COUNT;
-}
-
-#define JP_PID_LUT_SIZE 257
-static uint8_t g_pid_lut[JP_PID_LUT_SIZE];
-static int g_pid_lut_done = 0;
-static void jp_pid_lut_init(void)
-{
-	for(size_t pid = 0; pid < JP_POOL_COUNT; pid++) {
-		size_t sz = g_pools[pid].size;
-		size_t start = (pid == 0) ? 0 : g_pools[pid-1].size + 1;
-		for(size_t s = start; s <= sz && s < JP_PID_LUT_SIZE; s++)
-			g_pid_lut[s] = (uint8_t)pid;
+	if(size <= 1) return 0;
+	size_t exponent = 64 - (size_t)jp_clzll(size - 1);
+#if JP_ALLOC_INTERMEDIATE_K == 0
+	return exponent;
+#elif JP_ALLOC_INTERMEDIATE_K == 4
+	if(exponent < 8) return exponent;
+	if(exponent <= 11) {
+		size_t intermediate = (size_t)5 << (exponent - 3);
+		return 2 * exponent - (size <= intermediate ? 8 : 7);
 	}
-	g_pid_lut[0] = 0;
-	g_pid_lut_done = 1;
+	return exponent + 4;
+#else
+	if(exponent < 10) return exponent;
+	if(exponent <= 11) {
+		size_t intermediate = (size_t)21 << (exponent - 5);
+		return 2 * exponent - (size <= intermediate ? 10 : 9);
+	}
+	return exponent + 2;
+#endif
 }
 
 /* madvise(MADV_DONTNEED) returns freed large-block pages to the OS,
@@ -196,19 +206,6 @@ static size_t jp_madvise_pid_val(void)
 	return cached;
 }
 #define JP_MADVISE_PID jp_madvise_pid_val()
-
-/* __builtin_clzll fallback for MSVC */
-#ifdef _MSC_VER
-#include <intrin.h>
-static inline int jp_clzll(unsigned long long x)
-{
-	unsigned long r;
-	_BitScanReverse64(&r, x);
-	return 63 - (int)r;
-}
-#else
-#define jp_clzll(x) __builtin_clzll(x)
-#endif
 
 /* ---- Debug header (enabled by -DJP_ALLOC_DEBUG) ---- */
 #ifdef JP_ALLOC_DEBUG
@@ -284,16 +281,17 @@ static void os_free_pages(void *mem, size_t size)
  * counter, freed small blocks can't have their pages returned to the
  * OS because their neighbors on the same 4K page may still be in use.
  *
- * Fix: maintain a per-4K-page counter of USER-HELD blocks. When the
+ * Experiment: maintain a per-4K-page counter of USER-HELD blocks. When the
  * counter dec-and-tests to 0, schedule madvise(MADV_DONTNEED) via a
  * per-thread deferred batch (re-check at flush time to skip hot pages).
  *
  * Storage: 4K (= 2048 uint16_t entries) per 8M region = 0.049% overhead.
  * 8M-aligned regions: required so any sub-block address can mask down
- * to its region base in O(1).
+ * to its region base in O(1). This mechanism is disabled by default because
+ * madvise clears in-band freelist links and can race with block reuse.
  */
 #ifndef JP_ALLOC_PAGE_COUNTER
-#define JP_ALLOC_PAGE_COUNTER 1
+#define JP_ALLOC_PAGE_COUNTER 0
 #endif
 
 /* ---- Statistics (compiled in with -DJP_ALLOC_STATS) ---- */
@@ -532,8 +530,6 @@ static void tls_destructor(void *p)
 
 static inline size_t pool_id(size_t size)
 {
-	if(unlikely(!g_pid_lut_done)) jp_pid_lut_init();
-	if(likely(size <= 256)) return g_pid_lut[size];
 	return pool_id_by_size(size);
 }
 

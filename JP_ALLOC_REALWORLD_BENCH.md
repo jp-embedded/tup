@@ -29,11 +29,14 @@ the Blender/Python small-object pathology because the first added class is
 160B; finer classes below 128B would require a different split scheme.
 
 A clean tup parse with restricted K=4 and `JP_ALLOC_PAGE_COUNTER=0` took
-56.87s with 496836KB peak RSS, versus the normal K=4 median of 60.15s and
-699372KB. The page-counter/reclamation path therefore costs about 5.5% on
-this workload and, unexpectedly, increases rather than decreases peak RSS.
-The 8MB-aligned region layout and deferred page queue should be profiled
-before treating page reclamation as a memory optimization for tup.
+56.01s with 498424KB peak RSS, versus the counter-enabled K=4 median of
+60.15s and 699372KB. Instrumentation showed 880MB of pool regions mapped and
+only 722 freelist nodes remaining with counters, versus 384MB and 208475
+freelist nodes without counters. `MADV_DONTNEED` clears the in-band `next`
+pointers of free blocks on the page, truncating freelists and forcing new 8MB
+regions. It can also race with cross-thread allocation from the page. The
+page-counter implementation is therefore disabled by default; safe sub-4KB
+reclamation requires page-owned free structures and out-of-band metadata.
 
 Test machine: Intel Core i5-8250U (4 cores / 8 threads), 12 GB RAM,
 Linux x86_64. All allocators built with `-O2` and tested via `LD_PRELOAD`.
