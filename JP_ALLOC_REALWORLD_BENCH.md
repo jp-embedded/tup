@@ -28,15 +28,33 @@ large reduction for tup itself, so it is now the default. It does not solve
 the Blender/Python small-object pathology because the first added class is
 160B; finer classes below 128B would require a different split scheme.
 
-A clean tup parse with restricted K=4 and `JP_ALLOC_PAGE_COUNTER=0` took
-56.01s with 498424KB peak RSS, versus the counter-enabled K=4 median of
-60.15s and 699372KB. Instrumentation showed 880MB of pool regions mapped and
+A clean tup parse without sub-4KB page counters took 56.01s with 498424KB
+peak RSS, versus the counter-enabled K=4 median of 60.15s and 699372KB.
+Instrumentation showed 880MB of pool regions mapped and
 only 722 freelist nodes remaining with counters, versus 384MB and 208475
 freelist nodes without counters. `MADV_DONTNEED` clears the in-band `next`
 pointers of free blocks on the page, truncating freelists and forcing new 8MB
 regions. It can also race with cross-thread allocation from the page. The
-page-counter implementation is therefore disabled by default; safe sub-4KB
-reclamation requires page-owned free structures and out-of-band metadata.
+page-counter implementation was removed; safe sub-4KB reclamation requires
+page-owned free structures and out-of-band metadata.
+
+The final allocator reclaims only complete payload pages of pool blocks at
+least 32KB, before publishing the block on a freelist. It completed the clean
+tup parse in 57.56s at 498144KB. Reclaiming every block from 8KB upward took
+64.07s with no RSS improvement because tup frees millions of 8KB blocks.
+
+Final real-world K=4 results with the safe 32KB threshold:
+
+| Application | K=0 time/RSS | K=4 time/RSS |
+|---|---|---|
+| GCC SQLite -O2 | 14.01s / 369MB | 13.79s / 370MB |
+| GCC 8x SQLite -j8 | 15.01s / 362MB | 14.92s / 363MB |
+| ffmpeg 1080p | 1.35s / 2162MB | 1.34s / 2162MB |
+| OpenSCAD 8K spheres | 0.37s / 154MB | 0.36s / 150MB |
+| Inkscape 10K SVG | 0.61s / 225MB | 0.60s / 230MB |
+| Blender 1000 spheres | 47.58s / 25292MB | 43.15s / 25034MB |
+| NumPy SVD 2000² | 17.37s / 300MB | 17.69s / 298MB |
+| SQLite3 CLI 2M rows | 5.17s / 3319MB | 4.97s / 2764MB |
 
 Test machine: Intel Core i5-8250U (4 cores / 8 threads), 12 GB RAM,
 Linux x86_64. All allocators built with `-O2` and tested via `LD_PRELOAD`.
