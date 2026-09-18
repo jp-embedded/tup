@@ -78,6 +78,15 @@
 #define JP_ALLOC_MADVISE_SIZE (64 * 1024)
 #endif
 
+#ifndef JP_ALLOC_MADVISE_MODE
+#define JP_ALLOC_MADVISE_MODE JP_ALLOC_MADVISE_NONE
+#endif
+
+#if JP_ALLOC_MADVISE_MODE < JP_ALLOC_MADVISE_NONE || \
+    JP_ALLOC_MADVISE_MODE > JP_ALLOC_MADVISE_FREE
+#error "JP_ALLOC_MADVISE_MODE must be NONE, DONTNEED, or FREE"
+#endif
+
 /* ---- Pool table: power-of-2 + intermediate size classes ----
  *
  * K=0: pure power-of-2 (24 pools, 1..8M).
@@ -474,11 +483,16 @@ static void pool_put(union header *h, size_t pid)
 
 static void pool_release(union header *h, size_t pid)
 {
-#ifndef _WIN32
+#if !defined(_WIN32) && JP_ALLOC_MADVISE_MODE != JP_ALLOC_MADVISE_NONE
 	size_t block_size = g_pools[pid].size;
 	size_t page_size = os_page_size();
-	if(block_size >= JP_ALLOC_MADVISE_SIZE && block_size > page_size)
+	if(block_size >= JP_ALLOC_MADVISE_SIZE && block_size > page_size) {
+#if JP_ALLOC_MADVISE_MODE == JP_ALLOC_MADVISE_FREE && defined(MADV_FREE)
+		madvise((char *)h + page_size, block_size - page_size, MADV_FREE);
+#elif JP_ALLOC_MADVISE_MODE == JP_ALLOC_MADVISE_DONTNEED
 		madvise((char *)h + page_size, block_size - page_size, MADV_DONTNEED);
+#endif
+	}
 #endif
 	pool_put(h, pid);
 }

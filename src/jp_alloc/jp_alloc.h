@@ -1,7 +1,7 @@
 /* jp_alloc.h - lock-free allocator (C11)
  *
- * Public interface for jp_alloc — a lock-free, EBR-protected, thread-caching
- * memory allocator. See jp_alloc.c for the implementation.
+ * Public interface for jp_alloc, a per-thread buddy-split allocator.
+ * See jp_alloc.c for the implementation.
  *
  * Usage:
  *   1. Link jp_alloc.c into your binary. It overrides malloc/free/calloc/
@@ -13,11 +13,10 @@
  *      inline stub).
  *
  * Configuration (compile-time, all optional):
- *   -DJP_ALLOC_DEBUG          ABA / double-free / corruption self-checks
- *   -DJP_CACHE_N=32           Per-thread TLS cache cap per size class
- *   -DJP_REFILL=16            Batch size for global freelist refill (CASs/op)
- *   -DJP_ALLOC_POOL_COUNT=17  Number of power-of-2 pool classes (1..64K)
- *   -DJP_CACHELINE=64         Cache-line size for alignment padding
+ *   -DJP_ALLOC_DEBUG             Free-list/double-free/corruption checks
+ *   -DJP_ALLOC_INTERMEDIATE_K=4  Intermediate class ratio (0, 4, or 6)
+ *   -DJP_ALLOC_MADVISE_SIZE=64K Minimum advised pool block size
+ *   -DJP_ALLOC_MADVISE_MODE=... NONE, DONTNEED, or Linux FREE
  *
  * Platform requirements:
  *   - GCC 4.7+ or Clang 3.0+ (uses __atomic builtins, _Thread_local, _Alignas)
@@ -29,6 +28,10 @@
 #define JP_ALLOC_H
 
 #include <stddef.h>
+
+#define JP_ALLOC_MADVISE_NONE      0
+#define JP_ALLOC_MADVISE_DONTNEED  1
+#define JP_ALLOC_MADVISE_FREE      2
 
 #ifdef JP_ALLOC_IMPLEMENTATION
 /* jp_alloc.c is linked — real definition of jp_alloc_reset lives there */

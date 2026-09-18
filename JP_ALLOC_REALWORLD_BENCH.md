@@ -72,6 +72,40 @@ versus about 498144KB for the unsized build (12.3% lower). Alternating control
 runs were 61.08s unsized and 60.90s sized, so no material runtime cost was
 observed. A full clean parse also passed under `JP_ALLOC_DEBUG` cookie checks.
 
+## MADV_FREE comparison
+
+The safe payload-page path was compared with no advice, `MADV_DONTNEED`, and
+Linux `MADV_FREE`, all at a 64KB threshold.
+
+Focused immediate-reuse results (512 blocks, 30 cycles):
+
+| Block size | NONE | MADV_FREE | MADV_DONTNEED |
+|---|---:|---:|---:|
+| 64KB | 0.013s | 0.043s | 0.381s |
+| 256KB | 0.049s | 0.139s | 1.530s |
+| 1MB | 0.208s | 0.916s | 6.054s |
+
+`MADV_DONTNEED` faulted discarded payload pages on every reuse. `MADV_FREE`
+did not add repeated page faults, but still paid a syscall per free. Without
+memory pressure, almost all advised payload appeared as `LazyFree` while RSS
+remained unchanged. A bounded 512MB pressure allocation on this 251GB host
+was insufficient to force reclamation; reuse still incurred no payload-page
+faults.
+
+Clean tup parse medians:
+
+| Mode | Time | Peak RSS |
+|---|---:|---:|
+| NONE | 57.78s | 436336KB |
+| MADV_DONTNEED | 58.49s | 436316KB |
+| MADV_FREE | 58.67s | 437152KB |
+
+SQLite was effectively unchanged across modes. Blender favored no advice:
+42.49s/25348044KB for NONE, 45.91s/26020248KB for `MADV_FREE`, and
+45.13s/26004712KB for `MADV_DONTNEED`. Advice is therefore disabled by
+default. The next useful design is allocator-side aging or batching so hot
+blocks avoid syscalls; `MADV_FREE` is the better candidate for that cold path.
+
 Test machine: Intel Core i5-8250U (4 cores / 8 threads), 12 GB RAM,
 Linux x86_64. All allocators built with `-O2` and tested via `LD_PRELOAD`.
 Median of 3 runs unless noted. Run `bench_apps.sh` to reproduce.
