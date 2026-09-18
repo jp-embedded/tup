@@ -46,4 +46,37 @@ void *jp_realloc(void *mem, size_t new_size);
 void *jp_alloc_aligned(size_t alignment, size_t size);
 size_t jp_good_size(size_t size);
 
+struct jp_pool_config {
+	size_t size;
+	size_t alignment;
+};
+
+#define JP_POOL_CONFIG(type) { sizeof(type), _Alignof(type) }
+
+#ifdef JP_ALLOC_FALLBACK
+#include <stdlib.h>
+static inline void *jp_alloc_sized(size_t size) { return malloc(size); }
+static inline void jp_free_sized(void *mem, size_t size) { (void)size; free(mem); }
+static inline void *jp_realloc_sized(void *mem, size_t old_size, size_t new_size)
+{
+	(void)old_size;
+	return realloc(mem, new_size);
+}
+static inline void *jp_pool_alloc(const struct jp_pool_config *pool)
+{
+	return malloc(pool->size);
+}
+static inline void jp_pool_free(const struct jp_pool_config *pool, void *mem)
+{
+	(void)pool;
+	free(mem);
+}
+#else
+void *jp_alloc_sized(size_t size);
+void  jp_free_sized(void *mem, size_t size);
+void *jp_realloc_sized(void *mem, size_t old_size, size_t new_size);
+void *jp_pool_alloc(const struct jp_pool_config *pool);
+void  jp_pool_free(const struct jp_pool_config *pool, void *mem);
+#endif
+
 #endif /* JP_ALLOC_H */

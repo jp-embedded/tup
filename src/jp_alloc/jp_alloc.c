@@ -75,7 +75,7 @@
 #endif
 
 #ifndef JP_ALLOC_MADVISE_SIZE
-#define JP_ALLOC_MADVISE_SIZE (32 * 1024)
+#define JP_ALLOC_MADVISE_SIZE (64 * 1024)
 #endif
 
 /* ---- Pool table: power-of-2 + intermediate size classes ----
@@ -197,10 +197,22 @@ static inline size_t pool_id_by_size(size_t size)
 #define JP_UNSIZED_MAGIC 0x0BADDEA11DECULL
 #define JP_STATE_FREE    0xDEADBEEFFULL
 #define JP_STATE_LIVE    0xCAFEBABEULL
+#define JP_FREE_COOKIE   0x9E3779B97F4A7C15ULL
 
 #define JP_CHECK(cond, ...) do { \
 	if(!(cond)) { fprintf(stderr, "jp_alloc: " __VA_ARGS__); abort(); } \
 } while(0)
+#endif
+
+union header;
+
+#ifdef JP_ALLOC_DEBUG
+static inline uint64_t jp_free_cookie(union header *h, union header *next,
+				      size_t pid)
+{
+	return JP_FREE_COOKIE ^ (uintptr_t)h ^ ((uintptr_t)next >> 4)
+		^ ((uint64_t)pid << 48);
+}
 #endif
 
 /* ---- OS page allocation ---- */
@@ -377,6 +389,8 @@ static int is_pow2(size_t n)
 	return (n & (n - 1)) == 0;
 }
 
+static void pool_put(union header *h, size_t pid);
+
 /* pool_get: pop from freelist[pid]. If empty, split from a larger pool.
  * For power-of-2 pools: binary buddy split (half + half).
  * For intermediate pools: asymmetric split from next pow2 pool
@@ -386,7 +400,15 @@ static union header *pool_get(size_t pid)
 	/* Fast path: pop from freelist. */
 	if(likely(tls.freelist[pid] != NULL)) {
 		union header *h = tls.freelist[pid];
-		tls.freelist[pid] = h->s.next;
+		union header *next = h->s.next;
+#ifdef JP_ALLOC_DEBUG
+		JP_CHECK(h->s.state == JP_STATE_FREE,
+			 "pool_get: block %p is not free (state=%llx)\n", (void *)h,
+			 (unsigned long long)h->s.state);
+		JP_CHECK(h->s.magic == jp_free_cookie(h, next, pid),
+			 "pool_get: free block %p cookie mismatch\n", (void *)h);
+#endif
+		tls.freelist[pid] = next;
 		return h;
 	}
 	/* Empty: split from a larger pool. */
@@ -401,8 +423,7 @@ static union header *pool_get(size_t pid)
 			if(!big) return NULL;
 			size_t sz = g_pools[pid].size;
 			union header *spare = (union header *)((char *)big + sz);
-			spare->s.next = tls.freelist[pid];
-			tls.freelist[pid] = spare;
+			pool_put(spare, pid);
 			return big;
 		} else {
 			/* Asymmetric: carve from next pow2 pool.
@@ -415,17 +436,13 @@ static union header *pool_get(size_t pid)
 			char *p = (char *)big;
 			for(int i = 0; i < 3; i++) {
 				union header *h = (union header *)p;
-				h->s.next = tls.freelist[pid];
-				tls.freelist[pid] = h;
+				pool_put(h, pid);
 				p += inter_sz;
 			}
 			size_t small_pid = pool_id_by_size(small_sz);
 			union header *small_h = (union header *)p;
-			small_h->s.next = tls.freelist[small_pid];
-			tls.freelist[small_pid] = small_h;
-			union header *h = tls.freelist[pid];
-			tls.freelist[pid] = h->s.next;
-			return h;
+			pool_put(small_h, small_pid);
+			return pool_get(pid);
 		}
 	}
 	/* Largest pool: mmap a new region. */
@@ -443,12 +460,27 @@ static union header *pool_get(size_t pid)
 /* pool_put: push to this thread's freelist[pid]. Zero atomics. */
 static void pool_put(union header *h, size_t pid)
 {
+	union header *next = tls.freelist[pid];
 #ifdef JP_ALLOC_DEBUG
-	h->s.magic = JP_UNSIZED_MAGIC;
+	JP_CHECK(next != h, "pool_put: duplicate free of block %p\n", (void *)h);
+#endif
+	h->s.next = next;
+#ifdef JP_ALLOC_DEBUG
+	h->s.magic = jp_free_cookie(h, next, pid);
 	h->s.state = JP_STATE_FREE;
 #endif
-	h->s.next = tls.freelist[pid];
 	tls.freelist[pid] = h;
+}
+
+static void pool_release(union header *h, size_t pid)
+{
+#ifndef _WIN32
+	size_t block_size = g_pools[pid].size;
+	size_t page_size = os_page_size();
+	if(block_size >= JP_ALLOC_MADVISE_SIZE && block_size > page_size)
+		madvise((char *)h + page_size, block_size - page_size, MADV_DONTNEED);
+#endif
+	pool_put(h, pid);
 }
 
 /* ---- Aligned page allocation ---- */
@@ -495,6 +527,85 @@ size_t jp_good_size(size_t size)
 		size = (size + ps_mask) & ~ps_mask;
 	}
 	return size - sizeof(union header);
+}
+
+static size_t sized_pool_id(size_t size)
+{
+	if(size < sizeof(union header)) size = sizeof(union header);
+	return pool_id(size);
+}
+
+void *jp_alloc_sized(size_t size)
+{
+	size_t pid = sized_pool_id(size);
+	if(likely(pid < JP_POOL_COUNT)) {
+		tls_register();
+		union header *h = pool_get(pid);
+		if(!h) return NULL;
+		JP_STAT_ALLOC(pid);
+		JP_STAT_LIVE(pid);
+		return h;
+	}
+
+	size_t page_mask = os_page_size() - 1;
+	size_t alloc_size = (size + page_mask) & ~page_mask;
+	void *mem = os_alloc_pages(alloc_size);
+	if(mem) {
+		JP_STAT_MMAP_DIRECT(alloc_size);
+		JP_STAT_DIRECT_LIVE(alloc_size);
+	}
+	return mem;
+}
+
+void jp_free_sized(void *mem, size_t size)
+{
+	if(!mem) return;
+	size_t pid = sized_pool_id(size);
+	if(likely(pid < JP_POOL_COUNT)) {
+		JP_STAT_FREE(pid);
+		JP_STAT_DEAD(pid);
+		pool_release((union header *)mem, pid);
+		return;
+	}
+
+	size_t page_mask = os_page_size() - 1;
+	size_t alloc_size = (size + page_mask) & ~page_mask;
+	JP_STAT_DIRECT_DEAD(alloc_size);
+	os_free_pages(mem, alloc_size);
+}
+
+void *jp_realloc_sized(void *mem, size_t old_size, size_t new_size)
+{
+	if(!mem) return jp_alloc_sized(new_size);
+	if(new_size == 0) {
+		jp_free_sized(mem, old_size);
+		return NULL;
+	}
+
+	size_t old_pid = sized_pool_id(old_size);
+	size_t new_pid = sized_pool_id(new_size);
+	if(old_pid == new_pid && old_pid < JP_POOL_COUNT) return mem;
+
+	void *new_mem = jp_alloc_sized(new_size);
+	if(!new_mem) return NULL;
+	memcpy(new_mem, mem, old_size < new_size ? old_size : new_size);
+	jp_free_sized(mem, old_size);
+	return new_mem;
+}
+
+void *jp_pool_alloc(const struct jp_pool_config *pool)
+{
+	if(!pool || pool->alignment > _Alignof(max_align_t)) {
+		errno = EINVAL;
+		return NULL;
+	}
+	return jp_alloc_sized(pool->size);
+}
+
+void jp_pool_free(const struct jp_pool_config *pool, void *mem)
+{
+	if(!pool) return;
+	jp_free_sized(mem, pool->size);
 }
 
 void jp_alloc_reset(void)
@@ -600,7 +711,7 @@ void jp_free(void *mem)
 		if(block_size >= JP_ALLOC_MADVISE_SIZE && block_size > page_size)
 			madvise((char *)h + page_size, block_size - page_size, MADV_DONTNEED);
 #endif
-		pool_put(h, size);
+		pool_release(h, size);
 	} else {
 		JP_STAT_DIRECT_DEAD(size);
 		size_t pre_padding = (size_t)mem & (os_page_size() - 1);

@@ -19,12 +19,15 @@
  */
 
 #include "pel_group.h"
+#include "jp_alloc/jp_alloc.h"
 #include "db.h"
 #include "config.h"
 #include "entry.h"
 #include "compat.h"
 #include <stdio.h>
 #include <string.h>
+
+static const struct jp_pool_config pel_pool = JP_POOL_CONFIG(struct path_element);
 
 int pel_ignored(const char *path, int len)
 {
@@ -54,7 +57,7 @@ static int add_pel(const char *path, int len, struct pel_group *pg)
 {
 	struct path_element *pel;
 
-	pel = malloc(sizeof *pel);
+	pel = jp_pool_alloc(&pel_pool);
 	if(!pel) {
 		return -1;
 	}
@@ -188,7 +191,7 @@ int get_path_elements(const char *path, struct pel_group *pg)
 
 void free_pel(struct path_element *pel)
 {
-	free(pel);
+	jp_pool_free(&pel_pool, pel);
 }
 
 void del_pel(struct path_element *pel, struct pel_group *pg)

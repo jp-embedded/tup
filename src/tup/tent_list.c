@@ -19,14 +19,17 @@
  */
 
 #include "tent_list.h"
+#include "jp_alloc/jp_alloc.h"
 #include "entry.h"
 #include <stdio.h>
+
+static const struct jp_pool_config tent_list_pool = JP_POOL_CONFIG(struct tent_list);
 
 int tent_list_add_head(struct tent_list_head *head, struct tup_entry *tent)
 {
 	struct tent_list *tlist;
 
-	tlist = malloc(sizeof *tlist);
+	tlist = jp_pool_alloc(&tent_list_pool);
 	if(!tlist) {
 		return -1;
 	}
@@ -40,7 +43,7 @@ int tent_list_add_tail(struct tent_list_head *head, struct tup_entry *tent)
 {
 	struct tent_list *tlist;
 
-	tlist = malloc(sizeof *tlist);
+	tlist = jp_pool_alloc(&tent_list_pool);
 	if(!tlist) {
 		return -1;
 	}
@@ -54,7 +57,7 @@ void tent_list_delete(struct tent_list_head *head, struct tent_list *tlist)
 {
 	tup_entry_del_ref(tlist->tent);
 	TAILQ_REMOVE(head, tlist, list);
-	free(tlist);
+	jp_pool_free(&tent_list_pool, tlist);
 }
 
 void free_tent_list(struct tent_list_head *head)

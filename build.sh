@@ -70,6 +70,8 @@ if [ "$use_jp_alloc" = "y" ]; then
 	plat_files="$plat_files ../src/jp_alloc/jp_alloc.c"
 	# jp_alloc uses 64-bit CAS + EBR + thread-local cache; no -mcx16
 	# (the previous 128-bit tagged-pointer path has been removed).
+	else
+	CFLAGS="$CFLAGS -DJP_ALLOC_FALLBACK"
 fi
 
 rm -rf build

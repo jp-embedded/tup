@@ -19,12 +19,15 @@
  */
 
 #include "vardb.h"
+#include "jp_alloc/jp_alloc.h"
 #include "container.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "entry.h"
+
+static const struct jp_pool_config var_entry_pool = JP_POOL_CONFIG(struct var_entry);
 
 int vardb_init(struct vardb *v)
 {
@@ -42,7 +45,7 @@ int vardb_close(struct vardb *v)
 		string_tree_rm(&v->root, st);
 		free(st->s);
 		free(ve->value);
-		free(ve);
+		jp_pool_free(&var_entry_pool, ve);
 	}
 	return 0;
 }
@@ -83,7 +86,7 @@ struct var_entry *vardb_set2(struct vardb *v, const char *var, int varlen,
 		}
 		ve->tent = tent;
 	} else {
-		ve = malloc(sizeof *ve);
+		ve = jp_pool_alloc(&var_entry_pool);
 		if(!ve) {
 			perror("malloc");
 			return NULL;
@@ -95,7 +98,7 @@ struct var_entry *vardb_set2(struct vardb *v, const char *var, int varlen,
 		ve->var.s = malloc(ve->var.len + 1);
 		if(!ve->var.s) {
 			perror("malloc");
-			free(ve);
+			jp_pool_free(&var_entry_pool, ve);
 			return NULL;
 		}
 		memcpy(ve->var.s, var, varlen);
@@ -106,7 +109,7 @@ struct var_entry *vardb_set2(struct vardb *v, const char *var, int varlen,
 			if(!ve->value) {
 				perror("malloc");
 				free(ve->var.s);
-				free(ve);
+				jp_pool_free(&var_entry_pool, ve);
 				return NULL;
 			}
 			strcpy(ve->value, value);
@@ -119,7 +122,7 @@ struct var_entry *vardb_set2(struct vardb *v, const char *var, int varlen,
 			fprintf(stderr, "vardb_set: Error inserting into tree\n");
 			free(ve->value);
 			free(ve->var.s);
-			free(ve);
+			jp_pool_free(&var_entry_pool, ve);
 			return NULL;
 		}
 

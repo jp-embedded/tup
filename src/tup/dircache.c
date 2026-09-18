@@ -19,9 +19,12 @@
  */
 
 #include "dircache.h"
+#include "jp_alloc/jp_alloc.h"
 #include "container.h"
 #include <stdio.h>
 #include <stdlib.h>
+
+static const struct jp_pool_config dircache_pool = JP_POOL_CONFIG(struct dircache);
 
 void dircache_init(struct dircache_root *droot)
 {
@@ -38,7 +41,7 @@ void dircache_add(struct dircache_root *droot, int wd, tupid_t dt)
 		dircache_del(droot, dc);
 	}
 
-	dc = malloc(sizeof *dc);
+	dc = jp_pool_alloc(&dircache_pool);
 	if(!dc) {
 		fprintf(stderr, "Out of memory.\n");
 		return;
@@ -55,7 +58,7 @@ void dircache_del(struct dircache_root *droot, struct dircache *dc)
 {
 	tupid_tree_rm(&droot->wd_root, &dc->wd_node);
 	tupid_tree_rm(&droot->dt_root, &dc->dt_node);
-	free(dc);
+	jp_pool_free(&dircache_pool, dc);
 }
 
 struct dircache *dircache_lookup_wd(struct dircache_root *droot, int wd)

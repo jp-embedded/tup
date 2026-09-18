@@ -38,10 +38,14 @@ regions. It can also race with cross-thread allocation from the page. The
 page-counter implementation was removed; safe sub-4KB reclamation requires
 page-owned free structures and out-of-band metadata.
 
-The final allocator reclaims only complete payload pages of pool blocks at
-least 32KB, before publishing the block on a freelist. It completed the clean
+The allocator reclaims only complete payload pages of sufficiently large pool
+blocks, before publishing the block on a freelist. A 32KB threshold completed the clean
 tup parse in 57.56s at 498144KB. Reclaiming every block from 8KB upward took
-64.07s with no RSS improvement because tup frees millions of 8KB blocks.
+64.07s with no RSS improvement because tup frees millions of 8KB blocks. The
+final threshold is 64KB because the 300-thread stress workload also frees many
+32KB blocks; reclaiming those reduced throughput to 13.6 Mops/s. At 64KB the
+same stress test reached 68.2 Mops/s, and the descriptor-converted clean parse
+completed in 60.90s at 437132KB.
 
 Final real-world K=4 results with the safe 32KB threshold:
 
@@ -55,6 +59,18 @@ Final real-world K=4 results with the safe 32KB threshold:
 | Blender 1000 spheres | 47.58s / 25292MB | 43.15s / 25034MB |
 | NumPy SVD 2000² | 17.37s / 300MB | 17.69s / 298MB |
 | SQLite3 CLI 2M rows | 5.17s / 3319MB | 4.97s / 2764MB |
+
+## Shared-freelist sized API follow-up
+
+The former tup mempool objects and selected fixed-size parser records were
+converted to `jp_pool_alloc()`/`jp_pool_free()`. Sized allocations expose the
+complete raw block while unsized allocations reserve their hidden header; both
+forms use the same size-class freelists after free.
+
+Three clean parses used 436676-437044KB peak RSS, with a 436984KB median,
+versus about 498144KB for the unsized build (12.3% lower). Alternating control
+runs were 61.08s unsized and 60.90s sized, so no material runtime cost was
+observed. A full clean parse also passed under `JP_ALLOC_DEBUG` cookie checks.
 
 Test machine: Intel Core i5-8250U (4 cores / 8 threads), 12 GB RAM,
 Linux x86_64. All allocators built with `-O2` and tested via `LD_PRELOAD`.

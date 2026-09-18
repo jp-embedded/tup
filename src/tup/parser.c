@@ -21,6 +21,7 @@
 /* _ATFILE_SOURCE needed at least on linux x86_64 */
 #define _ATFILE_SOURCE
 #include "parser.h"
+#include "jp_alloc/jp_alloc.h"
 #include "luaparser.h"
 #include "progress.h"
 #include "fileio.h"
@@ -69,6 +70,9 @@ struct bang_list {
 	TAILQ_ENTRY(bang_list) list;
 	struct bang_rule *br;
 };
+static const struct jp_pool_config bang_rule_pool = JP_POOL_CONFIG(struct bang_rule);
+static const struct jp_pool_config name_list_entry_pool = JP_POOL_CONFIG(struct name_list_entry);
+static const struct jp_pool_config parser_directory_pool = JP_POOL_CONFIG(struct parser_directory);
 TAILQ_HEAD(bang_list_head, bang_list);
 
 struct build_name_list_args {
@@ -868,7 +872,7 @@ static void free_dir_list(struct string_entries *root, struct parser_directory *
 {
 	free_string_tree(&pd->files);
 	string_tree_remove(root, &pd->st);
-	free(pd);
+	jp_pool_free(&parser_directory_pool, pd);
 }
 
 static void free_dir_lists(struct string_entries *root)
@@ -893,7 +897,7 @@ static int gen_dir_list(struct tupfile *tf, tupid_t dt)
 
 	if(tup_entry_add(dt, &tent) < 0)
 		return -1;
-	pd = malloc(sizeof *pd);
+	pd = jp_pool_alloc(&parser_directory_pool);
 	if(!pd) {
 		perror("malloc");
 		return -1;
@@ -1574,7 +1578,7 @@ static char *split_eq(char *p)
 static struct bang_rule *alloc_br(void)
 {
 	struct bang_rule *br;
-	br = malloc(sizeof *br);
+	br = jp_pool_alloc(&bang_rule_pool);
 	if(!br) {
 		perror("malloc");
 		return NULL;
@@ -1728,7 +1732,7 @@ err_cleanup_br:
 	free(br->command);
 	free(br->input);
 	free(br->value);
-	free(br);
+	jp_pool_free(&bang_rule_pool, br);
 	return -1;
 }
 
@@ -1921,7 +1925,7 @@ static void free_bang_rule(struct string_entries *root, struct bang_rule *br)
 	}
 	free_path_list(&br->outputs);
 	free_path_list(&br->extra_outputs);
-	free(br);
+	jp_pool_free(&bang_rule_pool, br);
 }
 
 static void free_bang_tree(struct string_entries *root)
@@ -2815,7 +2819,7 @@ static int nl_add_external_path(struct path_list *pl, struct name_list *nl, int 
 	struct name_list_entry *nle;
 	int extlesslen;
 
-	nle = malloc(sizeof *nle);
+	nle = jp_pool_alloc(&name_list_entry_pool);
 	if(!nle) {
 		perror("malloc");
 		return -1;
@@ -2824,7 +2828,7 @@ static int nl_add_external_path(struct path_list *pl, struct name_list *nl, int 
 	nle->path = strdup(pl->mem);
 	if(!nle->path) {
 		perror("strdup");
-		free(nle);
+		jp_pool_free(&name_list_entry_pool, nle);
 		return -1;
 	}
 
@@ -2856,7 +2860,7 @@ static int nl_add_bin(struct bin *b, struct name_list *nl, int orderid)
 		if(extlesslen == 0)
 			extlesslen = be->len;
 
-		nle = malloc(sizeof *nle);
+		nle = jp_pool_alloc(&name_list_entry_pool);
 		if(!nle) {
 			perror("malloc");
 			return -1;
@@ -2864,7 +2868,7 @@ static int nl_add_bin(struct bin *b, struct name_list *nl, int orderid)
 
 		nle->path = malloc(be->len + 1);
 		if(!nle->path) {
-			free(nle);
+			jp_pool_free(&name_list_entry_pool, nle);
 			return -1;
 		}
 		memcpy(nle->path, be->path, be->len+1);
@@ -2935,7 +2939,7 @@ static int build_name_list_cb(void *arg, struct tup_entry *tent)
 	if(get_relative_dir(NULL, &e, tf->srctent->tnode.tupid, tent->tnode.tupid) < 0)
 		return -1;
 
-	nle = malloc(sizeof *nle);
+	nle = jp_pool_alloc(&name_list_entry_pool);
 	if(!nle) {
 		perror("malloc");
 		return -1;
@@ -3309,7 +3313,7 @@ static int do_rule_outputs(struct tupfile *tf, struct path_list_head *oplist, st
 		}
 
 
-		onle = malloc(sizeof *onle);
+		onle = jp_pool_alloc(&name_list_entry_pool);
 		if(!onle) {
 			parser_error(tf, "malloc");
 			return -1;
@@ -3366,7 +3370,7 @@ static int do_rule_outputs(struct tupfile *tf, struct path_list_head *oplist, st
 		   name_cmp(onle->path, TUP_CONFIG) == 0) {
 			fprintf(tf->f, "tup error: Attempted to generate a file called '%s', which is reserved by tup. Your build configuration must be comprised of files you write yourself.\n", onle->path);
 			free(onle->path);
-			free(onle);
+			jp_pool_free(&name_list_entry_pool, onle);
 			rc = -1;
 			continue;
 		}
@@ -3399,7 +3403,7 @@ static int do_rule_outputs(struct tupfile *tf, struct path_list_head *oplist, st
 							     command_modified);
 		if(!onle->tent) {
 			free(onle->path);
-			free(onle);
+			jp_pool_free(&name_list_entry_pool, onle);
 			return -1;
 		}
 		if(tent_tree_add(output_root, onle->tent) < 0) {
@@ -3800,7 +3804,7 @@ static void delete_name_list_entry(struct name_list *nl,
 
 	TAILQ_REMOVE(&nl->entries, nle, list);
 	free(nle->path);
-	free(nle);
+	jp_pool_free(&name_list_entry_pool, nle);
 }
 
 void move_name_list_entry(struct name_list *newnl, struct name_list *oldnl,

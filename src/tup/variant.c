@@ -19,6 +19,7 @@
  */
 
 #include "variant.h"
+#include "jp_alloc/jp_alloc.h"
 #include "entry.h"
 #include "db.h"
 #include "config.h"
@@ -32,6 +33,7 @@ static struct variant_head variant_list = LIST_HEAD_INITIALIZER(&variant_list);
 static struct variant_head disabled_list = LIST_HEAD_INITIALIZER(&disabled_list);
 static struct tupid_entries variant_root = RB_INITIALIZER(&variant_root);
 static struct tupid_entries variant_dt_root = RB_INITIALIZER(&variant_dt_root);
+static const struct jp_pool_config variant_pool = JP_POOL_CONFIG(struct variant);
 
 static int load_cb(void *arg, struct tup_entry *tent)
 {
@@ -68,7 +70,7 @@ int variant_add(struct tup_entry *tent, int enabled, struct variant **dest)
 {
 	struct variant *variant;
 
-	variant = malloc(sizeof *variant);
+	variant = jp_pool_alloc(&variant_pool);
 	if(!variant) {
 		perror("malloc");
 		return -1;
@@ -201,11 +203,11 @@ void variants_free(void)
 		tupid_tree_rm(&variant_root, &variant->tnode);
 		LIST_REMOVE(variant, list);
 		vardb_close(&variant->vdb);
-		free(variant);
+		jp_pool_free(&variant_pool, variant);
 	}
 	while(!LIST_EMPTY(&disabled_list)) {
 		variant = LIST_FIRST(&disabled_list);
 		LIST_REMOVE(variant, list);
-		free(variant);
+		jp_pool_free(&variant_pool, variant);
 	}
 }

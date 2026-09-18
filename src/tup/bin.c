@@ -19,9 +19,13 @@
  */
 
 #include "bin.h"
+#include "jp_alloc/jp_alloc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const struct jp_pool_config bin_pool = JP_POOL_CONFIG(struct bin);
+static const struct jp_pool_config bin_entry_pool = JP_POOL_CONFIG(struct bin_entry);
 
 void bin_list_del(struct bin_head *head)
 {
@@ -32,11 +36,11 @@ void bin_list_del(struct bin_head *head)
 			struct bin_entry *be = TAILQ_FIRST(&b->entries);
 			TAILQ_REMOVE(&b->entries, be, list);
 			free(be->path);
-			free(be);
+			jp_pool_free(&bin_entry_pool, be);
 		}
 		LIST_REMOVE(b, list);
 		free(b->name);
-		free(b);
+		jp_pool_free(&bin_pool, b);
 	}
 }
 
@@ -49,7 +53,7 @@ struct bin *bin_add(const char *name, struct bin_head *head)
 	if(b)
 		return b;
 
-	b = malloc(sizeof *b);
+	b = jp_pool_alloc(&bin_pool);
 	if(!b) {
 		perror("malloc");
 		return NULL;
@@ -59,7 +63,7 @@ struct bin *bin_add(const char *name, struct bin_head *head)
 	b->name = malloc(name_len + 1);
 	if (!b->name) {
 		perror("malloc");
-		free(b);
+		jp_pool_free(&bin_pool, b);
 		return NULL;
 	}
 	memcpy(b->name, name, name_len);
@@ -88,7 +92,7 @@ int bin_add_entry(struct bin *b, const char *path, int len,
 {
 	struct bin_entry *be;
 
-	be = malloc(sizeof *be);
+	be = jp_pool_alloc(&bin_entry_pool);
 	if(!be) {
 		perror("malloc");
 		return -1;
@@ -96,7 +100,7 @@ int bin_add_entry(struct bin *b, const char *path, int len,
 	be->path = malloc(len + 1);
 	if(!be->path) {
 		perror("malloc");
-		free(be);
+		jp_pool_free(&bin_entry_pool, be);
 		return -1;
 	}
 	memcpy(be->path, path, len);
