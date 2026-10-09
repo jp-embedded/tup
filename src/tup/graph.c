@@ -234,6 +234,7 @@ int create_graph(struct graph *g, enum TUP_NODE_TYPE count_flags)
 	TAILQ_INIT(&g->plist);
 	TAILQ_INIT(&g->removing_list);
 	tent_tree_init(&g->transient_root);
+	RB_INIT(&g->target_root);
 	tent_tree_init(&g->gen_delete_root);
 	tent_tree_init(&g->save_root);
 	tent_tree_init(&g->cmd_delete_root);
@@ -265,6 +266,7 @@ int destroy_graph(struct graph *g)
 	}
 	free_tent_tree(&g->normal_dir_root);
 	free_tent_tree(&g->parse_gitignore_root);
+	free_tupid_tree(&g->target_root);
 	return 0;
 }
 
@@ -375,6 +377,34 @@ int build_graph_non_transient_cb(void *arg, struct tup_entry *tent)
 	return build_graph_cb(arg, tent);
 }
 
+/* Record explicit outputs/groups before transient attachment. Directories
+ * select default targets only and must not independently pull in tn rules.
+ */
+int graph_add_targets(struct graph *g, int argc, char **argv)
+{
+	int x;
+	int dashdash = 0;
+
+	for(x=0; x<argc; x++) {
+		struct tup_entry *tent;
+		if(!dashdash) {
+			if(strcmp(argv[x], "--") == 0)
+				dashdash = 1;
+			if(argv[x][0] == '-')
+				continue;
+		}
+		tent = get_tent_dt(get_sub_dir_dt(), argv[x]);
+		if(!tent) {
+			fprintf(stderr, "tup: Unable to find tupid for '%s'\n", argv[x]);
+			return -1;
+		}
+		if(tent->type != TUP_NODE_DIR && tent->type != TUP_NODE_GENERATED_DIR)
+			if(tupid_tree_add_dup(&g->target_root, tent->tnode.tupid) < 0)
+				return -1;
+	}
+	return 0;
+}
+
 int build_graph_cb(void *arg, struct tup_entry *tent)
 {
 	struct graph *g = arg;
@@ -476,6 +506,7 @@ static int attach_transient_nodes(struct graph *g)
 		struct node *n;
 		struct edge *e;
 		int keep_cmd = 0;
+		int explicit_group = 0;
 		tent = tt->tent;
 
 		if(find_node(g, tent->tnode.tupid)) {
@@ -487,6 +518,13 @@ static int attach_transient_nodes(struct graph *g)
 		cmdnode = g->cur;
 		if(tup_db_select_node_by_link(build_graph_cb, g, g->cur->tnode.tupid) < 0)
 			return -1;
+		if(is_nondefault_tent(tent)) {
+			LIST_FOREACH(e, &cmdnode->edges, list) {
+				if(e->dest->tent->type == TUP_NODE_GROUP &&
+				   tupid_tree_search(&g->target_root, e->dest->tnode.tupid))
+					explicit_group = 1;
+			}
+		}
 		LIST_FOREACH(e, &cmdnode->edges, list) {
 			g->cur = e->dest;
 			if(tup_db_select_node_by_sticky_link(attach_transient_cb, g, g->cur->tnode.tupid) < 0)
@@ -502,15 +540,30 @@ static int attach_transient_nodes(struct graph *g)
 				keep_cmd = 1;
 				break;
 			}
+			/* A non-default transient output can also be needed directly,
+			 * without a consumer in the DAG. Reuse staged outputs rather
+			 * than rebuilding the producer solely for explicit selection.
+			 */
+			if(is_nondefault_tent(tent) && g->cur->tent->type == TUP_NODE_GENERATED &&
+			   !tup_db_in_transient_list(g->cur->tent->tnode.tupid) &&
+			   (explicit_group || tupid_tree_search(&g->target_root, g->cur->tnode.tupid))) {
+				keep_cmd = 1;
+				break;
+			}
 		}
 		if(keep_cmd) {
 			rc = 1;
 			LIST_FOREACH(e, &cmdnode->edges, list) {
 				n = e->dest;
-				if(node_remove_list(&g->plist, n) < 0)
-					return -1;
-				if(node_insert_tail(&g->node_list, n) < 0)
-					return -1;
+				/* A staged sibling may already be on node_list when
+				 * an explicit target requires a missing output.
+				 */
+				if(n->active_list == &g->plist) {
+					if(node_remove_list(&g->plist, n) < 0)
+						return -1;
+					if(node_insert_tail(&g->node_list, n) < 0)
+						return -1;
+				}
 				n->state = STATE_FINISHED;
 			}
 			g->cur = g->root;
@@ -814,6 +867,27 @@ static int prune_node(struct graph *g, struct node *n, int *num_pruned, enum gra
 	return 0;
 }
 
+/* Directory and default selections choose ordinary rules, not groups merely
+ * located in the selected scope. Explicit files/groups and dependencies are
+ * marked separately, so they can still select non-default producers.
+ */
+static int is_default_node(struct node *n)
+{
+	struct tup_entry *producer;
+
+	if(n->tent->type == TUP_NODE_GROUP)
+		return 0;
+	if(n->tent->type == TUP_NODE_CMD)
+		return !is_nondefault_tent(n->tent);
+	if(n->tent->type == TUP_NODE_GENERATED || n->tent->type == TUP_NODE_GENERATED_DIR) {
+		if(tup_db_get_incoming_link(n->tent, &producer) < 0)
+			return -1;
+		if(producer && is_nondefault_tent(producer))
+			return 0;
+	}
+	return 1;
+}
+
 int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 		enum graph_prune_type gpt, int verbose)
 {
@@ -822,6 +896,7 @@ int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 	int x;
 	int dashdash = 0;
 	int do_prune = 0;
+	int default_selection = 0;
 
 	*num_pruned = 0;
 
@@ -858,10 +933,41 @@ int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 		}
 	}
 
+	/* Keep the unfiltered update path for projects without non-default work.
+	 * Transient files may outlive their producer in a staged update, so check
+	 * those as well as commands before deciding whether to prune defaults.
+	 */
+	if(!do_prune && gpt == GRAPH_PRUNE_GENERATED) {
+		struct node *n;
+		TAILQ_FOREACH(n, &g->node_list, list) {
+			int is_default;
+			if(n->tent->type != TUP_NODE_CMD && !n->transient)
+				continue;
+			is_default = is_default_node(n);
+			if(is_default < 0)
+				goto out_err;
+			if(!is_default) {
+				do_prune = 1;
+				default_selection = 1;
+				break;
+			}
+		}
+	}
+
 	if(do_prune) {
 		struct tent_list *tl;
 		struct node *n;
 		struct node *tmp;
+
+		if(default_selection) {
+			TAILQ_FOREACH(n, &g->node_list, list) {
+				int is_default = is_default_node(n);
+				if(is_default < 0)
+					goto out_err;
+				if(is_default)
+					mark_nodes(n);
+			}
+		}
 
 		/* For explicit files: Just see if we have the node in the
 		 * PDAG, and if so, mark it.
@@ -881,6 +987,13 @@ int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 			TAILQ_FOREACH(n, &g->node_list, list) {
 				if(!n->marked && n->tent->type != TUP_NODE_ROOT) {
 					struct tup_entry *dtent;
+					if(gpt == GRAPH_PRUNE_GENERATED) {
+						int is_default = is_default_node(n);
+						if(is_default < 0)
+							goto out_err;
+						if(!is_default)
+							continue;
+					}
 					dtent = n->tent->parent;
 					while(dtent) {
 						if(tupid_tree_search(&dir_root, dtent->tnode.tupid) != NULL) {
