@@ -48,6 +48,13 @@ if tup init; then
 fi
 cd "$tmpdir"
 
+# The requested directory's ancestors also count when invoked elsewhere.
+if tup init explicit/child; then
+	echo 'Error: Expected initialization of a target beneath an ancestor database to fail' >&2
+	exit 1
+fi
+check_not_exist explicit/child/.tup/db
+
 # Existing corrupt databases are neither ignored nor overwritten.
 mkdir -p corrupt/.tup
 touch corrupt/Tupfile.ini
