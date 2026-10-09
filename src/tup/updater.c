@@ -427,7 +427,8 @@ int generate(int argc, char **argv)
 	if(tup_db_read_vars(varfiletent, vartent, generate_vardict_file) < 0)
 		return -1;
 
-	printf("Parsing...\n");
+	if(tup_option_get_flag("display.parse_verbose"))
+		printf("Parsing...\n");
 	if(create_graph(&g, TUP_NODE_DIR) < 0)
 		return -1;
 	if(tup_db_select_node_by_flags(build_graph_cb, &g, TUP_FLAGS_CREATE) < 0)

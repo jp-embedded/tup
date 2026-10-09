@@ -41,6 +41,7 @@ static int is_active = 0;
 static int color_len;
 static int got_error = 0;
 static int display_progress;
+static int display_parse_verbose;
 static int quiet;
 static int display_job_numbers;
 static int display_job_time;
@@ -68,6 +69,7 @@ void progress_init(void)
 		strlen(color_append_reverse()) +
 		strlen(color_end());
 	display_progress = tup_option_get_flag("display.progress");
+	display_parse_verbose = tup_option_get_flag("display.parse_verbose");
 	display_job_numbers = tup_option_get_flag("display.job_numbers");
 	display_job_time = tup_option_get_flag("display.job_time");
 	quiet = tup_option_get_flag("display.quiet");
@@ -218,6 +220,8 @@ void show_result(struct tup_entry *tent, int is_error, struct timespan *ts, cons
 	}
 
 	if(quiet && !always_display)
+		return;
+	if(!display_parse_verbose && tent->type == TUP_NODE_DIR && !is_error && !always_display)
 		return;
 
 	if(is_error) {
