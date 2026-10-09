@@ -245,8 +245,11 @@ int init_command(int argc, char **argv)
 	}
 
 	if(mkdir(TUP_DIR, 0777) != 0) {
-		perror(TUP_DIR);
-		return -1;
+		struct stat st;
+		if(errno != EEXIST || stat(TUP_DIR, &st) != 0 || !S_ISDIR(st.st_mode) || tup_db_exists()) {
+			perror(TUP_DIR);
+			return -1;
+		}
 	}
 
 	if(tup_db_create(db_sync, 0) != 0) {

@@ -24,6 +24,7 @@
 #include "tupid.h"
 #include <stdio.h>
 
+int tup_db_exists(void);
 int find_tup_dir(void);
 int open_tup_top(void);
 tupid_t get_sub_dir_dt(void);
