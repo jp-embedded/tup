@@ -30,13 +30,15 @@ echo second | diff - result.txt
 check_not_exist temporary.txt independent.txt
 
 # Adding an ordinary consumer pulls tn into default selection.
+rm result.txt
 echo ': temporary.txt |> cp %f %o |> ordinary.txt' >> Tupfile
 update_partial
 echo second | diff - ordinary.txt
 # The skipped result consumer still needs the newly staged transient file.
 check_exist temporary.txt
-check_not_exist independent.txt
+check_not_exist result.txt independent.txt
 update_partial result.txt
+echo second | diff - result.txt
 check_not_exist temporary.txt independent.txt
 
 # Explicit selection retains the pre-existing t cleanup behavior.
