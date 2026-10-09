@@ -221,6 +221,12 @@ int init_command(int argc, char **argv)
 		perror(dirname);
 		return -1;
 	}
+	/* Check the target's ancestors, not those of the invoking directory. */
+	if(fchdir(fd) < 0) {
+		perror("fchdir");
+		close(fd);
+		return -1;
+	}
 
 	if(!force_init && find_tup_dir() == 0) {
 		char wd[PATH_MAX];
