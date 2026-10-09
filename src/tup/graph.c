@@ -234,6 +234,7 @@ int create_graph(struct graph *g, enum TUP_NODE_TYPE count_flags)
 	TAILQ_INIT(&g->plist);
 	TAILQ_INIT(&g->removing_list);
 	tent_tree_init(&g->transient_root);
+	RB_INIT(&g->target_root);
 	tent_tree_init(&g->gen_delete_root);
 	tent_tree_init(&g->save_root);
 	tent_tree_init(&g->cmd_delete_root);
@@ -265,6 +266,7 @@ int destroy_graph(struct graph *g)
 	}
 	free_tent_tree(&g->normal_dir_root);
 	free_tent_tree(&g->parse_gitignore_root);
+	free_tupid_tree(&g->target_root);
 	return 0;
 }
 
@@ -363,17 +365,44 @@ int build_graph_transient_cb(void *arg, struct tup_entry *tent)
 int build_graph_non_transient_cb(void *arg, struct tup_entry *tent)
 {
 	/* Only build out nodes that aren't transient. Any transient nodes get
-	 * saved in g->transient_root for later processing. Non-default transient
-	 * commands stay available for explicit selection and are pruned later.
+	 * saved in g->transient_root for later processing.
 	 */
 	struct graph *g = arg;
-	if(tent->type == TUP_NODE_CMD && is_transient_tent(tent) && !is_nondefault_tent(tent)) {
+	if(tent->type == TUP_NODE_CMD && is_transient_tent(tent)) {
 		if(tent_tree_add(&g->transient_root, tent) < 0)
 			return -1;
 		return 0;
 	}
 
 	return build_graph_cb(arg, tent);
+}
+
+/* Record explicit outputs/groups before transient attachment. Directories
+ * select default targets only and must not independently pull in tn rules.
+ */
+int graph_add_targets(struct graph *g, int argc, char **argv)
+{
+	int x;
+	int dashdash = 0;
+
+	for(x=0; x<argc; x++) {
+		struct tup_entry *tent;
+		if(!dashdash) {
+			if(strcmp(argv[x], "--") == 0)
+				dashdash = 1;
+			if(argv[x][0] == '-')
+				continue;
+		}
+		tent = get_tent_dt(get_sub_dir_dt(), argv[x]);
+		if(!tent) {
+			fprintf(stderr, "tup: Unable to find tupid for '%s'\n", argv[x]);
+			return -1;
+		}
+		if(tent->type != TUP_NODE_DIR && tent->type != TUP_NODE_GENERATED_DIR)
+			if(tupid_tree_add_dup(&g->target_root, tent->tnode.tupid) < 0)
+				return -1;
+	}
+	return 0;
 }
 
 int build_graph_cb(void *arg, struct tup_entry *tent)
@@ -477,6 +506,7 @@ static int attach_transient_nodes(struct graph *g)
 		struct node *n;
 		struct edge *e;
 		int keep_cmd = 0;
+		int explicit_group = 0;
 		tent = tt->tent;
 
 		if(find_node(g, tent->tnode.tupid)) {
@@ -488,6 +518,13 @@ static int attach_transient_nodes(struct graph *g)
 		cmdnode = g->cur;
 		if(tup_db_select_node_by_link(build_graph_cb, g, g->cur->tnode.tupid) < 0)
 			return -1;
+		if(is_nondefault_tent(tent)) {
+			LIST_FOREACH(e, &cmdnode->edges, list) {
+				if(e->dest->tent->type == TUP_NODE_GROUP &&
+				   tupid_tree_search(&g->target_root, e->dest->tnode.tupid))
+					explicit_group = 1;
+			}
+		}
 		LIST_FOREACH(e, &cmdnode->edges, list) {
 			g->cur = e->dest;
 			if(tup_db_select_node_by_sticky_link(attach_transient_cb, g, g->cur->tnode.tupid) < 0)
@@ -500,6 +537,16 @@ static int attach_transient_nodes(struct graph *g)
 			 *  2) We link to something in the DAG (!LIST_EMPTY)
 			 */
 			if(!tup_db_in_transient_list(g->cur->tent->tnode.tupid) && !LIST_EMPTY(&g->cur->edges)) {
+				keep_cmd = 1;
+				break;
+			}
+			/* A non-default transient output can also be needed directly,
+			 * without a consumer in the DAG. Reuse staged outputs rather
+			 * than rebuilding the producer solely for explicit selection.
+			 */
+			if(is_nondefault_tent(tent) && g->cur->tent->type == TUP_NODE_GENERATED &&
+			   !tup_db_in_transient_list(g->cur->tent->tnode.tupid) &&
+			   (explicit_group || tupid_tree_search(&g->target_root, g->cur->tnode.tupid))) {
 				keep_cmd = 1;
 				break;
 			}
