@@ -63,6 +63,8 @@ grep 'parse-directory' .tup/verbose-output
 grep '100%' .tup/verbose-output
 
 # Script generation does not use the updater's progress initialization.
+# Its fresh in-memory database requires declared outputs not to exist yet.
+rm parse-directory/result.txt
 tup generate .tup/verbose-script.sh > .tup/generate-verbose-output
 grep 'parse-directory' .tup/generate-verbose-output
 echo 'parse_verbose = false' >> .tup/options
