@@ -38,4 +38,18 @@ update_partial final2.txt
 check_not_exist tmp1.txt tmp2.txt
 echo second | diff - final2.txt
 
+# Request a missing sibling while the other output is still staged.
+update_partial tmp2.txt
+check_exist tmp1.txt tmp2.txt
+update_partial final1.txt
+check_not_exist tmp1.txt
+check_exist tmp2.txt
+update_partial tmp1.txt
+check_exist tmp1.txt tmp2.txt
+update_partial final1.txt
+check_not_exist tmp1.txt
+check_exist tmp2.txt
+update_partial final2.txt
+check_not_exist tmp1.txt tmp2.txt
+
 eotup

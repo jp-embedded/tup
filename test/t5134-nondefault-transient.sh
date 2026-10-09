@@ -11,7 +11,7 @@ echo first > input.txt
 cat > Tupfile << HERE
 : input.txt |> ^tn^ cp %f %o |> temporary.txt
 : temporary.txt |> ^n^ cp %f %o |> result.txt <tests>
-: input.txt |> ^nt^ cp %f %o |> independent.txt
+: input.txt |> ^nt^ echo independent-ran; cp %f %o |> independent.txt <independent>
 HERE
 update_partial
 check_not_exist temporary.txt result.txt independent.txt
@@ -41,6 +41,12 @@ check_not_exist temporary.txt independent.txt
 
 # Explicit selection retains the pre-existing t cleanup behavior.
 update_partial independent.txt
+check_not_exist independent.txt
+update_partial independent.txt > .tup/independent-output
+grep '^independent-ran$' .tup/independent-output
+check_not_exist independent.txt
+update_partial '<independent>' > .tup/independent-group-output
+grep '^independent-ran$' .tup/independent-group-output
 check_not_exist independent.txt
 
 eotup
