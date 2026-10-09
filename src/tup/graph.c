@@ -363,10 +363,11 @@ int build_graph_transient_cb(void *arg, struct tup_entry *tent)
 int build_graph_non_transient_cb(void *arg, struct tup_entry *tent)
 {
 	/* Only build out nodes that aren't transient. Any transient nodes get
-	 * saved in g->transient_root for later processing.
+	 * saved in g->transient_root for later processing. Non-default transient
+	 * commands stay available for explicit selection and are pruned later.
 	 */
 	struct graph *g = arg;
-	if(tent->type == TUP_NODE_CMD && is_transient_tent(tent)) {
+	if(tent->type == TUP_NODE_CMD && is_transient_tent(tent) && !is_nondefault_tent(tent)) {
 		if(tent_tree_add(&g->transient_root, tent) < 0)
 			return -1;
 		return 0;
@@ -814,6 +815,27 @@ static int prune_node(struct graph *g, struct node *n, int *num_pruned, enum gra
 	return 0;
 }
 
+/* Directory and default selections choose ordinary rules, not groups merely
+ * located in the selected scope. Explicit files/groups and dependencies are
+ * marked separately, so they can still select non-default producers.
+ */
+static int is_default_node(struct node *n)
+{
+	struct tup_entry *producer;
+
+	if(n->tent->type == TUP_NODE_GROUP)
+		return 0;
+	if(n->tent->type == TUP_NODE_CMD)
+		return !is_nondefault_tent(n->tent);
+	if(n->tent->type == TUP_NODE_GENERATED || n->tent->type == TUP_NODE_GENERATED_DIR) {
+		if(tup_db_get_incoming_link(n->tent, &producer) < 0)
+			return -1;
+		if(producer && is_nondefault_tent(producer))
+			return 0;
+	}
+	return 1;
+}
+
 int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 		enum graph_prune_type gpt, int verbose)
 {
@@ -822,6 +844,7 @@ int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 	int x;
 	int dashdash = 0;
 	int do_prune = 0;
+	int default_selection = 0;
 
 	*num_pruned = 0;
 
@@ -858,10 +881,41 @@ int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 		}
 	}
 
+	/* Keep the unfiltered update path for projects without non-default work.
+	 * Transient files may outlive their producer in a staged update, so check
+	 * those as well as commands before deciding whether to prune defaults.
+	 */
+	if(!do_prune && gpt == GRAPH_PRUNE_GENERATED) {
+		struct node *n;
+		TAILQ_FOREACH(n, &g->node_list, list) {
+			int is_default;
+			if(n->tent->type != TUP_NODE_CMD && !n->transient)
+				continue;
+			is_default = is_default_node(n);
+			if(is_default < 0)
+				goto out_err;
+			if(!is_default) {
+				do_prune = 1;
+				default_selection = 1;
+				break;
+			}
+		}
+	}
+
 	if(do_prune) {
 		struct tent_list *tl;
 		struct node *n;
 		struct node *tmp;
+
+		if(default_selection) {
+			TAILQ_FOREACH(n, &g->node_list, list) {
+				int is_default = is_default_node(n);
+				if(is_default < 0)
+					goto out_err;
+				if(is_default)
+					mark_nodes(n);
+			}
+		}
 
 		/* For explicit files: Just see if we have the node in the
 		 * PDAG, and if so, mark it.
@@ -881,6 +935,13 @@ int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,
 			TAILQ_FOREACH(n, &g->node_list, list) {
 				if(!n->marked && n->tent->type != TUP_NODE_ROOT) {
 					struct tup_entry *dtent;
+					if(gpt == GRAPH_PRUNE_GENERATED) {
+						int is_default = is_default_node(n);
+						if(is_default < 0)
+							goto out_err;
+						if(!is_default)
+							continue;
+					}
 					dtent = n->tent->parent;
 					while(dtent) {
 						if(tupid_tree_search(&dir_root, dtent->tnode.tupid) != NULL) {

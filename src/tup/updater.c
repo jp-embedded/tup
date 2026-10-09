@@ -2957,6 +2957,9 @@ static int update(struct node *n)
 				case 'j':
 					/* Only used for compile_commands.json */
 					break;
+				case 'n':
+					/* Only used for target selection. */
+					break;
 				case 't':
 					remove_transients = 1;
 					break;
