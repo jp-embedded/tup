@@ -91,6 +91,7 @@ static struct option {
 	{"display.color", "auto", NULL, is_color},
 	{"display.width", NULL, get_console_width, is_number},
 	{"display.progress", NULL, stdout_isatty, is_flag},
+	{"display.parse_verbose", "1", NULL, is_flag},
 	{"display.job_numbers", "1", NULL, is_flag},
 	{"display.job_time", "1", NULL, is_flag},
 	{"display.quiet", "0", NULL, is_flag},
