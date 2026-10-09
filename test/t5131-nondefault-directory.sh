@@ -16,19 +16,19 @@ cat > suite/run/Tupfile << HERE
 : |> touch %o |> program
 : |> ^n^ touch %o |> result.txt ../<tests>
 HERE
-update suite
+update_partial suite
 check_exist suite/program suite/run/program
 check_not_exist suite/result.txt suite/run/result.txt
-update suite/run
+update_partial suite/run
 check_not_exist suite/run/result.txt
-update .
+update_partial .
 check_not_exist suite/result.txt suite/run/result.txt
 
 # An explicit output alongside a directory does not select its group peers.
-update suite suite/result.txt
+update_partial suite suite/result.txt
 check_exist suite/result.txt
 check_not_exist suite/run/result.txt
-update 'suite/<tests>'
+update_partial 'suite/<tests>'
 check_exist suite/run/result.txt
 
 eotup

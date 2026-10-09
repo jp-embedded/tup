@@ -16,7 +16,7 @@ cat > run.sh << HERE
 echo first > tmp1.txt
 echo second > tmp2.txt
 HERE
-update
+update_partial
 check_not_exist tmp1.txt tmp2.txt final1.txt final2.txt
 
 # The existing partial-update lifetime applies to explicitly selected tn.

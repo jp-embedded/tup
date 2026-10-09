@@ -12,27 +12,27 @@ cat > Tupfile << HERE
 : input.txt |> cp %f %o |> ordinary.txt
 : input.txt |> ^n^ cp %f %o |> optional.txt
 HERE
-update
+update_partial
 check_exist ordinary.txt
 check_not_exist optional.txt
-update
+update_partial
 check_not_exist optional.txt
 
-update optional.txt
+update_partial optional.txt
 echo first | diff - optional.txt
 update_null 'Explicitly selected clean non-default outputs must not rerun.'
 
 echo second > input.txt
-update
+update_partial
 echo second | diff - ordinary.txt
 echo first | diff - optional.txt
-update optional.txt
+update_partial optional.txt
 echo second | diff - optional.txt
 
 rm optional.txt
-update
+update_partial
 check_not_exist optional.txt
-update optional.txt
+update_partial optional.txt
 echo second | diff - optional.txt
 
 eotup

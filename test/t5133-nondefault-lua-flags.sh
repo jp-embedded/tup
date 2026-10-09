@@ -11,9 +11,9 @@ echo first > input.txt
 cat > Tupfile.lua << HERE
 tup.rule({'input.txt'}, '^no COPY^ cat %f > %1o; cp %1o %2o', {'one.txt', 'two.txt'})
 HERE
-update
+update_partial
 check_not_exist one.txt two.txt
-update two.txt
+update_partial two.txt
 echo first | diff - one.txt
 echo first | diff - two.txt
 update_null 'Selecting one output must update the whole rule only once.'
@@ -23,7 +23,7 @@ cat > Tupfile.lua << HERE
 tup.rule({'input.txt'}, '^o COPY^ cat %f > %1o; cp %1o %2o', {'one.txt', 'two.txt'})
 HERE
 echo second > input.txt
-update
+update_partial
 echo second | diff - one.txt
 echo second | diff - two.txt
 
@@ -32,9 +32,9 @@ cat > Tupfile.lua << HERE
 tup.rule({'input.txt'}, '^no COPY^ cat %f > %1o; cp %1o %2o', {'one.txt', 'two.txt'})
 HERE
 echo third > input.txt
-update
+update_partial
 echo second | diff - one.txt
-update one.txt
+update_partial one.txt
 echo third | diff - one.txt
 echo third | diff - two.txt
 

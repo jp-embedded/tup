@@ -13,30 +13,30 @@ cat > Tupfile << HERE
 : temporary.txt |> ^n^ cp %f %o |> result.txt <tests>
 : input.txt |> ^nt^ cp %f %o |> independent.txt
 HERE
-update
+update_partial
 check_not_exist temporary.txt result.txt independent.txt
-update .
+update_partial .
 check_not_exist temporary.txt result.txt independent.txt
-update '<tests>'
+update_partial '<tests>'
 echo first | diff - result.txt
 check_not_exist temporary.txt independent.txt
 
 echo second > input.txt
-update
+update_partial
 echo first | diff - result.txt
 check_not_exist temporary.txt independent.txt
-update result.txt
+update_partial result.txt
 echo second | diff - result.txt
 check_not_exist temporary.txt independent.txt
 
 # Adding an ordinary consumer pulls tn into default selection.
 echo ': temporary.txt |> cp %f %o |> ordinary.txt' >> Tupfile
-update
+update_partial
 echo second | diff - ordinary.txt
 check_not_exist temporary.txt independent.txt
 
 # Explicit selection retains the pre-existing t cleanup behavior.
-update independent.txt
+update_partial independent.txt
 check_not_exist independent.txt
 
 eotup

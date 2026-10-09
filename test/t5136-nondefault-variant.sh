@@ -14,20 +14,20 @@ cat > suite/Tupfile << HERE
 : input.txt |> cp %f %o |> program.txt
 : program.txt |> ^n^ cp %f %o |> result.txt ../<autotest>
 HERE
-update build-one/suite
+update_partial build-one/suite
 check_exist build-one/suite/program.txt
 check_not_exist build-one/suite/result.txt build-two/suite/program.txt
-update 'build-one/<autotest>'
+update_partial 'build-one/<autotest>'
 check_exist build-one/suite/result.txt
 check_not_exist build-two/suite/result.txt
 
 echo second > suite/input.txt
-update
+update_partial
 echo second | diff - build-one/suite/program.txt
 echo second | diff - build-two/suite/program.txt
 echo first | diff - build-one/suite/result.txt
 check_not_exist build-two/suite/result.txt
-update 'build-two/<autotest>'
+update_partial 'build-two/<autotest>'
 echo second | diff - build-two/suite/result.txt
 echo first | diff - build-one/suite/result.txt
 

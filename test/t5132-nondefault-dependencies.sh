@@ -12,24 +12,24 @@ cat > Tupfile << HERE
 : input.txt |> ^n^ cp %f %o |> direct.txt
 : direct.txt |> cp %f %o |> direct-final.txt
 : input.txt |> ^n^ cp %f %o |> grouped.txt <inputs>
-: <inputs> |> cat %f > %o |> grouped-final.txt
+: <inputs> |> cat %<inputs> > %o |> grouped-final.txt
 : input.txt |> ^n^ cp %f %o |> chain.txt <chain>
-: <chain> |> ^n^ cat %f > %o |> chain-final.txt <tests>
+: <chain> |> ^n^ cat %<chain> > %o |> chain-final.txt <tests>
 : input.txt |> ^n^ cp %f %o |> unrelated.txt
 HERE
-update
+update_partial
 check_exist direct.txt direct-final.txt grouped.txt grouped-final.txt
 check_not_exist chain.txt chain-final.txt unrelated.txt
-update '<tests>'
+update_partial '<tests>'
 check_exist chain.txt chain-final.txt
 check_not_exist unrelated.txt
 
 echo second > input.txt
-update
+update_partial
 echo second | diff - direct-final.txt
 echo second | diff - grouped-final.txt
 echo first | diff - chain-final.txt
-update '<tests>'
+update_partial '<tests>'
 echo second | diff - chain-final.txt
 check_not_exist unrelated.txt
 
