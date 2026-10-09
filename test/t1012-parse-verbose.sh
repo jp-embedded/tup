@@ -14,6 +14,7 @@
 cat > .tup/options << HERE
 [display]
 color = never
+width = 80
 progress = 0
 job_numbers = 1
 job_time = 0
@@ -61,8 +62,17 @@ tup parse > .tup/verbose-output
 grep 'parse-directory' .tup/verbose-output
 grep '100%' .tup/verbose-output
 
-# Explicit Tupfile output is not hidden by the verbosity setting.
+# Script generation does not use the updater's progress initialization.
+tup generate .tup/verbose-script.sh > .tup/generate-verbose-output
+grep 'parse-directory' .tup/generate-verbose-output
 echo 'parse_verbose = false' >> .tup/options
+tup generate .tup/quiet-script.sh > .tup/generate-quiet-output
+if grep 'parse-directory' .tup/generate-quiet-output; then
+	echo 'Error: Non-verbose script generation printed a parsing result' >&2
+	exit 1
+fi
+
+# Explicit Tupfile output is not hidden by the verbosity setting.
 mkdir parser-message
 echo 'print("parser-output-visible")' > parser-message/Tupfile.lua
 tup parse > .tup/message-output
