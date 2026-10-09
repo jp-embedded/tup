@@ -555,10 +555,15 @@ static int attach_transient_nodes(struct graph *g)
 			rc = 1;
 			LIST_FOREACH(e, &cmdnode->edges, list) {
 				n = e->dest;
-				if(node_remove_list(&g->plist, n) < 0)
-					return -1;
-				if(node_insert_tail(&g->node_list, n) < 0)
-					return -1;
+				/* A staged sibling may already be on node_list when
+				 * an explicit target requires a missing output.
+				 */
+				if(n->active_list == &g->plist) {
+					if(node_remove_list(&g->plist, n) < 0)
+						return -1;
+					if(node_insert_tail(&g->node_list, n) < 0)
+						return -1;
+				}
 				n->state = STATE_FINISHED;
 			}
 			g->cur = g->root;

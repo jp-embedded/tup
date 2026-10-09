@@ -11,12 +11,13 @@ echo first > input.txt
 cat > Tupfile << HERE
 : input.txt |> ^tn^ cp %f %o |> temporary.txt
 : temporary.txt |> ^n^ cp %f %o |> result.txt <tests>
-: input.txt |> ^nt^ echo independent-ran; cp %f %o |> independent.txt <independent>
+: input.txt |> ^nt^ echo independent-ran; cp %f %o |> independent.txt
+: input.txt |> ^tn^ echo independent-group-ran; cp %f %o |> grouped.txt <independent>
 HERE
 update_partial
-check_not_exist temporary.txt result.txt independent.txt
+check_not_exist temporary.txt result.txt independent.txt grouped.txt
 update_partial .
-check_not_exist temporary.txt result.txt independent.txt
+check_not_exist temporary.txt result.txt independent.txt grouped.txt
 update_partial '<tests>'
 echo first | diff - result.txt
 check_not_exist temporary.txt independent.txt
@@ -48,7 +49,10 @@ update_partial independent.txt > .tup/independent-output
 grep '^independent-ran$' .tup/independent-output
 check_not_exist independent.txt
 update_partial '<independent>' > .tup/independent-group-output
-grep '^independent-ran$' .tup/independent-group-output
-check_not_exist independent.txt
+grep '^independent-group-ran$' .tup/independent-group-output
+check_not_exist grouped.txt
+update_partial '<independent>' > .tup/independent-group-output
+grep '^independent-group-ran$' .tup/independent-group-output
+check_not_exist grouped.txt
 
 eotup
