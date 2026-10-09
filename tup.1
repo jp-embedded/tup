@@ -144,6 +144,8 @@ Kills the monitor if it is running. Basically it saves you the trouble of lookin
 .B variant foo.config [bar.config] [...]
 For each argument, this command creates a variant directory with tup.config symlinked (Windows: copied) to the specified config file. For example, if a directory contained several variant configurations, one could easily create a variant for each config file:
 
+Config paths are relative to the directory where the command is invoked, while variant directories are created at the project root. All config arguments must resolve to regular files; valid symlinks to config files are accepted. If any config is missing, is a dangling symlink, or is not a regular file, the command fails before creating any variants. Other failures, such as an existing nonempty variant directory, can still leave earlier variants created by the same invocation.
+
 .nf
 $ ls configs/
 bar.config
