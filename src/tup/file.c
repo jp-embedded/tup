@@ -241,7 +241,11 @@ int write_files(FILE *f, tupid_t cmdid, struct file_info *info, int *warnings,
 	finfo_lock(info);
 	handle_unlink(info);
 
-	if(check_only == CHECK_SUCCESS) {
+	/* Excluded writes are published even when the command fails or is
+	 * signalled. Materialize their directories before renaming staged files
+	 * into them, just as on the successful-command path.
+	 */
+	{
 		while(!TAILQ_EMPTY(&info->tmpdir_list)) {
 			struct tup_entry *match = NULL;
 
@@ -256,7 +260,7 @@ int write_files(FILE *f, tupid_t cmdid, struct file_info *info, int *warnings,
 						return -1;
 					}
 				}
-			} else {
+			} else if(check_only == CHECK_SUCCESS) {
 				fprintf(f, "tup error: Directory '%s' was created, but not subsequently removed. Only temporary directories can be created by commands.\n", tmpdir->dirname);
 				tmpdir_bork = 1;
 			}
