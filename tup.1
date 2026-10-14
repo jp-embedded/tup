@@ -64,7 +64,9 @@ tup [--debug-sql] [--debug-fuse] SECONDARY_COMMAND [SECONDARY_COMMAND_ARGS]
 .B init [directory]
 Creates a '.tup' directory in the specified directory and initializes the tup database. If a directory name is unspecified, it defaults to creating '.tup' in the current directory. This defines the top of your project, as viewed by tup. Everything in the current directory and its subdirectories are known as the "tup hierarchy".
 
-If you want to avoid having to run 'tup init' every time you clone your repository to a new location, you can instead create an empty file called 'Tupfile.ini' in the project root. If 'tup' is run without the '.tup' directory present, it will automatically create one for you as a sibling of the Tupfile.ini file, as if you had run 'tup init' in that directory. If there are multiple Tupfile.ini files in parent paths, the one highest up the tree will be chosen.
+An existing '.tup' directory without a database can also be initialized. Existing databases are not replaced, even if they are invalid.
+
+If you want to avoid having to run 'tup init' every time you clone your repository to a new location, you can instead create an empty file called 'Tupfile.ini' in the project root. If 'tup' is run without the '.tup/db' database present, it will automatically initialize one for you as a sibling of the Tupfile.ini file, as if you had run 'tup init' in that directory. If there are multiple Tupfile.ini files in parent paths, the one highest up the tree will be chosen. An existing ancestor database still takes precedence over automatic initialization.
 .RS
 .TP
 .B --no-sync

@@ -221,6 +221,12 @@ int init_command(int argc, char **argv)
 		perror(dirname);
 		return -1;
 	}
+	/* Check the target's ancestors, not those of the invoking directory. */
+	if(fchdir(fd) < 0) {
+		perror("fchdir");
+		close(fd);
+		return -1;
+	}
 
 	if(!force_init && find_tup_dir() == 0) {
 		char wd[PATH_MAX];
@@ -245,8 +251,11 @@ int init_command(int argc, char **argv)
 	}
 
 	if(mkdir(TUP_DIR, 0777) != 0) {
-		perror(TUP_DIR);
-		return -1;
+		struct stat st;
+		if(errno != EEXIST || stat(TUP_DIR, &st) != 0 || !S_ISDIR(st.st_mode) || tup_db_exists()) {
+			perror(TUP_DIR);
+			return -1;
+		}
 	}
 
 	if(tup_db_create(db_sync, 0) != 0) {

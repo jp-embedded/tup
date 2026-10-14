@@ -45,9 +45,18 @@ static char internal_path_sep = '\\';
 static char internal_path_sep = '/';
 #endif
 
-int find_tup_dir(void)
+int tup_db_exists(void)
 {
 	struct stat st;
+
+	/* Only a missing database is uninitialized. Keep inaccessible files and
+	 * dangling symlinks as project boundaries so they cannot be overwritten.
+	 */
+	return lstat(".tup/db", &st) == 0 || errno != ENOENT;
+}
+
+int find_tup_dir(void)
+{
 
 	if(getcwd(tup_wd, sizeof(tup_wd)) == NULL) {
 		perror("getcwd");
@@ -58,7 +67,7 @@ int find_tup_dir(void)
 	tup_top_len = strlen(tup_wd);
 	tup_sub_len = 0;
 	while(1) {
-		if(stat(".tup", &st) == 0 && S_ISDIR(st.st_mode)) {
+		if(tup_db_exists()) {
 			tup_wd_offset = tup_top_len;
 			while(is_path_sep(&tup_wd[tup_wd_offset])) {
 				tup_wd_offset++;

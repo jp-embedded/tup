@@ -31,6 +31,7 @@
 #include "option.h"
 #include "vardb.h"
 #include "init.h"
+#include "config.h"
 
 /* inih's ini.h */
 #include "ini.h"
@@ -133,7 +134,6 @@ int tup_option_process_ini(void)
 
 	while(1) {
 		FILE *f;
-		struct stat st;
 		char path_buf[8];
 
 		f = fopen("Tupfile.ini", "r");
@@ -154,7 +154,7 @@ int tup_option_process_ini(void)
 			fclose(f);
 		}
 
-		if(stat(".tup", &st) == 0 && S_ISDIR(st.st_mode)) {
+		if(tup_db_exists()) {
 			found_tup_dir = 1;
 			break;
 		}
