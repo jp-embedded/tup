@@ -33,7 +33,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 
-static char tup_wd[PATH_MAX];
+static char tup_wd[PATH_MAX] = "";
 static int tup_wd_offset;
 static int tup_top_len;
 static int tup_sub_len;

@@ -113,7 +113,6 @@ int main(int argc, char **argv)
 	int orig_argc;
 	char *tupexe = argv[0];
 	char **orig_argv;
-
 	/* Skip 'tup' executable argument */
 	argc--;
 	argv++;
