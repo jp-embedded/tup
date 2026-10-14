@@ -219,6 +219,9 @@ void show_result(struct tup_entry *tent, int is_error, struct timespan *ts, cons
 
 	if(quiet && !always_display)
 		return;
+	if(tent->type == TUP_NODE_DIR && !is_error && !always_display &&
+	   !tup_option_get_flag("display.parse_verbose"))
+		return;
 
 	if(is_error) {
 		got_error = 1;
