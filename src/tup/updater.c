@@ -1653,6 +1653,8 @@ static int process_update_nodes(int argc, char **argv, int *num_pruned)
 	 */
 	if(tup_db_select_node_by_flags(build_graph_transient_cb, &g, TUP_FLAGS_TRANSIENT) < 0)
 		return -1;
+	if(graph_add_targets(&g, argc, argv) < 0)
+		return -1;
 	if(build_graph(&g) < 0)
 		return -1;
 
@@ -2957,6 +2959,9 @@ static int update(struct node *n)
 					break;
 				case 'j':
 					/* Only used for compile_commands.json */
+					break;
+				case 'n':
+					/* Only used for target selection. */
 					break;
 				case 't':
 					remove_transients = 1;

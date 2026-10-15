@@ -19,7 +19,7 @@ Tup has no domain-specific knowledge. You must tell tup how to build your progra
 You can do all of your development with just 'tup', along with writing Tupfiles. See also the \fBINI FILE\fR, \fBOPTIONS FILES\fR and \fBTUPFILES\fR sections below.
 .TP
 .B tup [<output_1> ... <output_n>]
-Updates the set of outputs based on the dependency graph and the current state of the filesystem. If no outputs are specified then the whole project is updated. This is what you run every time you make changes to your software to bring it up-to-date. You can run this anywhere in the tup hierarchy, and it will always update the requested output. By default, the list of files that are changed are determined by scanning the filesystem and checking modification times. For very large projects this may be slow, but you can skip the scanning time by running the file monitor (see SECONDARY COMMANDS for a description of the monitor).
+Updates the set of outputs based on the dependency graph and the current state of the filesystem. If no outputs are specified then the project's default targets and their dependencies are updated. Rules with the 'n' command flag are non-default: they are selected only by an explicit output or group request, or as dependencies of selected targets. A directory request recursively selects default targets within that directory, not independent non-default rules. This is what you run every time you make changes to your software to bring it up-to-date. You can run this anywhere in the tup hierarchy, and it will always update the requested output. By default, the list of files that are changed are determined by scanning the filesystem and checking modification times. For very large projects this may be slow, but you can skip the scanning time by running the file monitor (see SECONDARY COMMANDS for a description of the monitor).
 .RS
 .TP
 .B -jN
@@ -491,6 +491,19 @@ The 'c' flag causes the command to fail if tup does not support user namespaces 
 .TP
 .B j
 The 'j' flag marks the command for export in the 'tup compiledb' command. If you are interested in using compile_commands.json, annotate the commands that you want to export with ^j and then run 'tup compiledb'. See the compiledb command for more details.
+.TP
+.B n
+The 'n' flag makes a rule non-default. Plain 'tup' and directory requests do not select it independently. Explicitly requesting one of its outputs or a group containing its outputs selects the rule, as does building a selected target that depends on it, including dependencies through groups. Selection applies to the entire rule and all its outputs; it does not force an up-to-date command to run again.
+
+Skipped non-default rules remain pending, and their existing outputs are retained. This is useful for test-run rules: a directory request can build test executables without running tests, while an explicit test-results group selects their execution. For example:
+.nf
+
+: test-program |> ^n RUN %f^ %f > %o |> test-result.txt <tests>
+
+.fi
+Plain 'tup' builds the test program when needed but does not independently run this rule. 'tup test-result.txt' or 'tup <tests>' selects it. Quote group arguments in a shell, for example: tup '<tests>'.
+
+The 'n' flag can be combined with 't': 'n' controls selection, while 't' retains its usual transient-output cleanup behavior. The 'n' flag alone does not make outputs transient.
 .TP
 .B o
 The 'o' flag causes the command to compare the new outputs against the outputs from the previous run. Any outputs that are the same will not cause dependent commands in the DAG to be executed. For example, adding this flag to a compilation command will skip the linking step if the object file is the same from the last time it ran. The 'o' flag is incompatible with the 't' flag.

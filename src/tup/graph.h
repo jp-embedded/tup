@@ -80,6 +80,7 @@ struct graph {
 	struct node_head plist;
 	struct node_head removing_list;
 	struct tent_entries transient_root;
+	struct tupid_entries target_root;
 	struct node *root;
 	struct node *cur;
 	int num_nodes;
@@ -112,6 +113,7 @@ int build_graph_non_transient_cb(void *arg, struct tup_entry *tent);
 int build_graph_cb(void *arg, struct tup_entry *tent);
 int build_graph_group_cb(void *arg, struct tup_entry *tent);
 int build_graph(struct graph *g);
+int graph_add_targets(struct graph *g, int argc, char **argv);
 int graph_empty(struct graph *g);
 int add_graph_stickies(struct graph *g);
 int prune_graph(struct graph *g, int argc, char **argv, int *num_pruned,

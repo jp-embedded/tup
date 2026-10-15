@@ -804,6 +804,11 @@ int is_transient_tent(struct tup_entry *tent)
 	return has_flag(tent, 't');
 }
 
+int is_nondefault_tent(struct tup_entry *tent)
+{
+	return has_flag(tent, 'n');
+}
+
 int is_compiledb_tent(struct tup_entry *tent)
 {
 	return has_flag(tent, 'j');
