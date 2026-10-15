@@ -891,11 +891,34 @@ static int create_variant(const char *config_path)
 static int variant(int argc, char **argv)
 {
 	int x;
+	struct stat st;
 
 	if(argc < 1) {
 		fprintf(stderr, "Usage: variant foo.config [bar.config] [...]\n");
 		fprintf(stderr, "This will create a build-foo directory with a tup.config symlink to foo.config\n");
 		return -1;
+	}
+	/* Config arguments are relative to the invoking directory. Validate all
+	 * of them before creating any variant directories or tup.config links.
+	 */
+	if(fchdir(tup_top_fd()) < 0) {
+		perror("fchdir");
+		return -1;
+	}
+	if(get_sub_dir_len() && chdir(get_sub_dir()) < 0) {
+		perror(get_sub_dir());
+		return -1;
+	}
+	for(x=0; x<argc; x++) {
+		if(stat(argv[x], &st) < 0) {
+			perror(argv[x]);
+			fprintf(stderr, "tup error: Unable to access variant config file '%s'.\n", argv[x]);
+			return -1;
+		}
+		if(!S_ISREG(st.st_mode)) {
+			fprintf(stderr, "tup error: Variant config file '%s' is not a regular file.\n", argv[x]);
+			return -1;
+		}
 	}
 	if(tup_db_begin() < 0)
 		return -1;
