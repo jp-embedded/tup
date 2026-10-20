@@ -767,7 +767,7 @@ run ./build.sh *.c src/*.c
 
 .TP
 .B export VARIABLE
-The export directive adds the environment variable VARIABLE to the export list for future :-rules and run-scripts. The value for the variable comes from tup's environment, not from the Tupfile itself. Generally this means you will need to set the variable in your shell if you want to change the value used by commands and scripts. By default only PATH is exported. Windows additionally exports several variables suitable for building with the Visual Studio compiler suite. Tup will check the exported environment variables to see if they have changed values between updates, and re-execute any commands that that use those environment variables. Note that this means if PATH is changed, all commands will run again. For example:
+The export directive adds the environment variable VARIABLE to the export list for future :-rules and run-scripts. The value for the variable comes from tup's environment, not from the Tupfile itself. Generally this means you will need to set the variable in your shell if you want to change the value used by commands and scripts. By default only PATH is exported. Windows additionally exports several variables suitable for building with the Visual Studio compiler suite. Tup compares each command's exported environment with the environment of its last successful execution, and re-executes the command when they differ. Note that this means if PATH is changed, all selected commands will run again. For example:
 .nf
 
 : |> command1 ... |>
@@ -786,6 +786,8 @@ export FOO
 
 .fi
 when run as "$ FOO=silly tup" would result in the contents of the foo.txt file being "myFOO= envFOO=silly". If the "export FOO" was removed from the Tupfile, the contents of the file would be "myFOO= envFOO=" because tup does not propagate environment variables unless they are explicitly exported. This helps preserve repeatable and deterministic builds.
+
+An unrelated partial update does not replace the successful environment of commands it does not execute. For example, after "FOO=silly tup foo.txt", running "tup unrelated-target" without FOO and then "FOO=silly tup foo.txt" does not rebuild foo.txt solely because the intervening update observed a different environment. Independent changes to files or rules still require rebuilding. Failed executions remain pending even if their environment subsequently returns to the last successful value. Unset variables are distinct from variables set to an empty string. These per-command comparisons apply to execution rules; environment dependencies used while parsing Tupfiles or running parse-time scripts still trigger parsing when their values change.
 
 If you wish to export a variable to a specific value rather than get the value from the environment, you can do that in your shell instead of through tup. For example, in Linux you can do:
 

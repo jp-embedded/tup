@@ -72,6 +72,7 @@ struct node {
 	unsigned char skip;
 	unsigned char counted;
 	unsigned char transient;
+	unsigned char environment_only;
 };
 TAILQ_HEAD(node_head, node);
 
@@ -110,6 +111,7 @@ void save_graphs(struct graph *g);
 int build_graph_transient_cb(void *arg, struct tup_entry *tent);
 int build_graph_non_transient_cb(void *arg, struct tup_entry *tent);
 int build_graph_cb(void *arg, struct tup_entry *tent);
+int build_graph_environment_cb(void *arg, struct tup_entry *tent);
 int build_graph_group_cb(void *arg, struct tup_entry *tent);
 int build_graph(struct graph *g);
 int graph_empty(struct graph *g);
