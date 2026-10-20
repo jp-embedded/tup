@@ -70,6 +70,7 @@ struct node *create_node(struct graph *g, struct tup_entry *tent)
 	n->marked = 0;
 	n->skip = 1;
 	n->counted = 0;
+	n->environment_only = 1;
 	if(node_insert_tail(&g->node_list, n) < 0)
 		return NULL;
 
@@ -317,6 +318,7 @@ static int make_edge(struct graph *g, struct node *n)
 
 	if(g->cur == g->root) {
 		n->skip = 0;
+		n->environment_only = 0;
 	}
 	if(create_edge(g->cur, n, TUP_LINK_NORMAL) < 0)
 		return -1;
@@ -418,6 +420,30 @@ int build_graph_cb(void *arg, struct tup_entry *tent)
 	}
 
 	return make_edge(g, n);
+}
+
+int build_graph_environment_cb(void *arg, struct tup_entry *tent)
+{
+	struct graph *g = arg;
+	struct node *n = find_node(g, tent->tnode.tupid);
+	int normal_source = n && !n->skip;
+	if(build_graph_non_transient_cb(arg, tent) < 0)
+		return -1;
+	n = find_node(g, tent->tnode.tupid);
+	if(n && !normal_source)
+		n->environment_only = 1;
+	return 0;
+}
+
+static void mark_normal_changes(struct node *n)
+{
+	struct edge *e;
+	LIST_FOREACH(e, &n->edges, list) {
+		if((e->style & TUP_LINK_NORMAL) && e->dest->environment_only) {
+			e->dest->environment_only = 0;
+			mark_normal_changes(e->dest);
+		}
+	}
 }
 
 static struct node *find_or_create_node(struct graph *g, struct tup_entry *tent)
@@ -590,6 +616,7 @@ static int attach_transient_nodes(struct graph *g)
 int build_graph(struct graph *g)
 {
 	struct node *cur;
+	struct edge *e;
 
 	/* First fill out the graph with everything that we know needs to be
 	 * built.
@@ -641,6 +668,16 @@ int build_graph(struct graph *g)
 	 * rebuild.
 	 */
 	free_tent_tree(&g->transient_root);
+
+	/* Environment-only changes must not become persistent file changes when
+	 * a partial update prunes them. Preserve every independent normal cause,
+	 * including changes to predecessors of an environment-affected command.
+	 * Do this before adding order-only (sticky) edges.
+	 */
+	LIST_FOREACH(e, &g->root->edges, list) {
+		if(!e->dest->environment_only)
+			mark_normal_changes(e->dest);
+	}
 
 	/* Don't add graph stickies for groups, or for the create graph
 	 * (count_flags == TUP_NODE_DIR). The latter is because we don't want
@@ -830,11 +867,13 @@ static int prune_node(struct graph *g, struct node *n, int *num_pruned, enum gra
 			fprintf(stderr, "tup internal error: node of type %i trying to add to the modify list in prune_graph\n", n->tent->type);
 			return -1;
 		}
-		/* Mark all pruned commands as modify to make sure they are
+		/* Mark normally-dirty pruned commands as modify to make sure they are
 		 * still executed on the next update (since we won't hit the
-		 * logic that normally adds them in update_work())
+		 * logic that normally adds them in update_work()). Environment-only
+		 * work is retained separately, and can become clean if its successful
+		 * environment is restored before execution.
 		 */
-		if(tup_db_add_modify_list(n->tent->tnode.tupid) < 0)
+		if(!n->environment_only && tup_db_add_modify_list(n->tent->tnode.tupid) < 0)
 			return -1;
 
 		g->num_nodes--;

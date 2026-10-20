@@ -39,6 +39,7 @@
 #include "timespan.h"
 #include "variant.h"
 #include "logging.h"
+#include "sha256.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -49,7 +50,7 @@
 #include <sys/stat.h>
 #include "sqlite3/sqlite3.h"
 
-#define DB_VERSION 19
+#define DB_VERSION 20
 #define PARSER_VERSION 16
 
 enum {
@@ -138,6 +139,13 @@ enum {
 	DB_GET_VARDB,
 	_DB_VAR_FLAG_DIRS,
 	_DB_DELETE_VAR_ENTRY,
+	DB_ENV_PENDING_INSERT,
+	DB_ENV_PENDING_UPDATE,
+	DB_ENV_ORPHAN,
+	DB_ENV_HASH,
+	DB_ENV_SAVE,
+	DB_ENV_PENDING_SELECT,
+	DB_ENV_PENDING_CLEAR,
 	DB_NUM_STATEMENTS
 };
 
@@ -325,6 +333,9 @@ int tup_db_create(int db_sync, int memory_db)
 		"create table modify_list (id integer primary key not null)",
 		"create table variant_list (id integer primary key not null)",
 		"create table transient_list (id integer primary key not null)",
+		"create table command_env (id integer primary key not null, hash blob, pending integer not null default 0)",
+		"create index command_env_pending on command_env(pending) where pending=1",
+		"create trigger delete_command_env after delete on node begin delete from command_env where id=old.id; end",
 		"create index normal_index2 on normal_link(to_id)",
 		"create index sticky_index2 on sticky_link(to_id)",
 		"create index group_index2 on group_link(cmdid)",
@@ -670,6 +681,16 @@ static int version_check(void)
 				"alter table node add column mtime_ns integer default 0",
 			}
 		},
+		{
+			/* Upgrade to version 20 */
+			"Track the environment of each command's last successful execution. Commands with exported environments will be rebuilt once.",
+			{
+				"create table command_env (id integer primary key not null, hash blob, pending integer not null default 0)",
+				"create index command_env_pending on command_env(pending) where pending=1",
+				"create trigger delete_command_env after delete on node begin delete from command_env where id=old.id; end",
+				"insert into command_env(id, pending) select distinct l.to_id, 1 from sticky_link l join node e on e.id=l.from_id join node c on c.id=l.to_id where e.dir=(select id from node where dir=1 and name='$') and c.type=1",
+			}
+		},
 	};
 
 	if(tup_db_config_get_int("db_version", -1, &version) < 0)
@@ -865,6 +886,17 @@ static int check_flags_cb(void *arg, int argc, char **argv, char **col)
 	return 0;
 }
 
+static int check_environment_flags_cb(void *arg, struct tup_entry *tent)
+{
+	if(check_flags_name) {
+		fprintf(stderr, "*** %s_list:\n", check_flags_name);
+		check_flags_name = NULL;
+	}
+	fprintf(stderr, "%lli\n", tent->tnode.tupid);
+	*(int *)arg = 1;
+	return 0;
+}
+
 int tup_db_check_flags(int flags)
 {
 	int rc = 0;
@@ -919,6 +951,11 @@ int tup_db_check_flags(int flags)
 			return -1;
 		}
 		transaction_started = 0;
+	}
+	if(flags & TUP_FLAGS_MODIFY) {
+		check_flags_name = "environment";
+		if(tup_db_select_env_commands(check_environment_flags_cb, &rc, 0) < 0)
+			return -1;
 	}
 	if(tup_db_commit() < 0)
 		return -1;
@@ -5104,6 +5141,142 @@ static struct var_entry *envdb_set(const char *var, int varlen, const char *newe
 	return ve;
 }
 
+static int env_statement(int id, const char *sql, tupid_t tupid)
+{
+	sqlite3_stmt **stmt = &stmts[id];
+	int rc;
+	transaction_check("%s [%lli]", sql, tupid);
+	if(!*stmt && sqlite3_prepare_v2(tup_db, sql, -1, stmt, NULL) != SQLITE_OK)
+		goto error;
+	if(sqlite3_bind_int64(*stmt, 1, tupid) != SQLITE_OK)
+		goto error;
+	rc = sqlite3_step(*stmt);
+	if(msqlite3_reset(*stmt) != SQLITE_OK || rc != SQLITE_DONE)
+		goto error;
+	return 0;
+error:
+	fprintf(stderr, "SQL error: %s\nStatement was: %s\n", sqlite3_errmsg(tup_db), sql);
+	return -1;
+}
+
+int tup_db_env_changed(tupid_t tupid)
+{
+	/* Keep environment causes separate from modify_list. A command skipped
+	 * by a partial update may already have succeeded with the next invocation's
+	 * environment, even though another invocation observed different values.
+	 */
+	if(env_statement(DB_ENV_PENDING_INSERT,
+		"insert or ignore into command_env(id, pending) select l.to_id, 1 from normal_link l join node n on n.id=l.to_id where l.from_id=? and n.type=1", tupid) < 0)
+		return -1;
+	if(env_statement(DB_ENV_PENDING_UPDATE,
+		"update command_env set pending=1 where id in (select to_id from normal_link where from_id=?)", tupid) < 0)
+		return -1;
+	/* Retain lazy cleanup of variables that have no remaining users. */
+	return env_statement(DB_ENV_ORPHAN,
+		"insert or ignore into modify_list select ?1 where not exists (select 1 from normal_link where from_id=?1)", tupid);
+}
+
+static int command_env_hash(tupid_t cmdid, unsigned char hash[32])
+{
+	sqlite3_stmt **stmt = &stmts[DB_ENV_HASH];
+	const char *sql = "select n.name, v.value from sticky_link l join node n on n.id=l.from_id left join var v on v.id=n.id where l.to_id=? and n.dir=? order by n.name";
+	struct tup_sha256 ctx;
+	int rc;
+	if(!*stmt && sqlite3_prepare_v2(tup_db, sql, -1, stmt, NULL) != SQLITE_OK)
+		goto error;
+	if(sqlite3_bind_int64(*stmt, 1, cmdid) != SQLITE_OK ||
+	   sqlite3_bind_int64(*stmt, 2, env_dt()) != SQLITE_OK)
+		goto error;
+	tup_sha256_init(&ctx);
+	while((rc = sqlite3_step(*stmt)) == SQLITE_ROW) {
+		const char *name = (const char *)sqlite3_column_text(*stmt, 0);
+		const char *value = (const char *)sqlite3_column_text(*stmt, 1);
+		unsigned char present = value != NULL;
+		/* NUL-delimited names/values cannot be ambiguous, and the presence
+		 * marker distinguishes unset from empty. Sorting by name makes the
+		 * digest independent of node allocation and export order.
+		 */
+		tup_sha256_update(&ctx, name, strlen(name) + 1);
+		tup_sha256_update(&ctx, &present, 1);
+		if(value)
+			tup_sha256_update(&ctx, value, strlen(value) + 1);
+	}
+	if(msqlite3_reset(*stmt) != SQLITE_OK || rc != SQLITE_DONE)
+		goto error;
+	tup_sha256_final(&ctx, hash);
+	return 0;
+error:
+	fprintf(stderr, "SQL error: %s\nStatement was: %s\n", sqlite3_errmsg(tup_db), sql);
+	return -1;
+}
+
+int tup_db_save_environ(tupid_t cmdid)
+{
+	sqlite3_stmt **stmt = &stmts[DB_ENV_SAVE];
+	const char *sql = "insert or replace into command_env(id, hash, pending) values(?, ?, 0)";
+	unsigned char hash[32];
+	int rc;
+	if(command_env_hash(cmdid, hash) < 0)
+		return -1;
+	transaction_check("%s [%lli]", sql, cmdid);
+	if(!*stmt && sqlite3_prepare_v2(tup_db, sql, -1, stmt, NULL) != SQLITE_OK)
+		goto error;
+	if(sqlite3_bind_int64(*stmt, 1, cmdid) != SQLITE_OK ||
+	   sqlite3_bind_blob(*stmt, 2, hash, sizeof(hash), SQLITE_TRANSIENT) != SQLITE_OK)
+		goto error;
+	rc = sqlite3_step(*stmt);
+	if(msqlite3_reset(*stmt) != SQLITE_OK || rc != SQLITE_DONE)
+		goto error;
+	return 0;
+error:
+	fprintf(stderr, "SQL error: %s\nStatement was: %s\n", sqlite3_errmsg(tup_db), sql);
+	return -1;
+}
+
+int tup_db_select_env_commands(int (*callback)(void *, struct tup_entry *), void *arg, int clear_matches)
+{
+	sqlite3_stmt **stmt = &stmts[DB_ENV_PENDING_SELECT];
+	const char *sql = "select id, hash from command_env where pending=1";
+	struct tupid_entries clear_root = RB_INITIALIZER(&clear_root);
+	struct tupid_tree *tt;
+	int rc;
+	if(!*stmt && sqlite3_prepare_v2(tup_db, sql, -1, stmt, NULL) != SQLITE_OK)
+		goto error;
+	while((rc = sqlite3_step(*stmt)) == SQLITE_ROW) {
+		tupid_t cmdid = sqlite3_column_int64(*stmt, 0);
+		unsigned char hash[32];
+		struct tup_entry *tent;
+		if(command_env_hash(cmdid, hash) < 0)
+			goto error;
+		if(sqlite3_column_bytes(*stmt, 1) == sizeof(hash) &&
+		   memcmp(hash, sqlite3_column_blob(*stmt, 1), sizeof(hash)) == 0) {
+			if(clear_matches && tupid_tree_add(&clear_root, cmdid) < 0)
+				goto error;
+		} else {
+			if(tup_entry_add(cmdid, &tent) < 0 || callback(arg, tent) < 0)
+				goto error;
+		}
+	}
+	if(msqlite3_reset(*stmt) != SQLITE_OK || rc != SQLITE_DONE)
+		goto error;
+	/* Do not change the pending index while iterating over it. */
+	while((tt = RB_MIN(tupid_entries, &clear_root)) != NULL) {
+		tupid_t cmdid = tt->tupid;
+		tupid_tree_rm(&clear_root, tt);
+		free(tt);
+		if(env_statement(DB_ENV_PENDING_CLEAR,
+			"update command_env set pending=0 where id=?", cmdid) < 0) {
+			free_tupid_tree(&clear_root);
+			return -1;
+		}
+	}
+	return 0;
+error:
+	free_tupid_tree(&clear_root);
+	fprintf(stderr, "SQL error: %s\nStatement was: %s\n", sqlite3_errmsg(tup_db), sql);
+	return -1;
+}
+
 static int env_cb(int environ_check, struct tup_entry *tent, const char *var, const char *stored_value)
 {
 	const char *env;
@@ -5163,7 +5336,7 @@ static int env_cb(int environ_check, struct tup_entry *tent, const char *var, co
 		printf(" - New: '%s'\n", env);
 		if(tup_db_add_create_list(tent->tnode.tupid) < 0)
 			return -1;
-		if(tup_db_add_modify_list(tent->tnode.tupid) < 0)
+		if(tup_db_env_changed(tent->tnode.tupid) < 0)
 			return -1;
 	}
 	ve = envdb_set(var, varlen, env, envlen, tent, !match);
