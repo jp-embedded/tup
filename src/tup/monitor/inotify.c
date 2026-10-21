@@ -505,7 +505,7 @@ static int monitor_loop(void)
 			return -1;
 		if(tup_db_select_node_by_flags(mod_cb, &modified, TUP_FLAGS_MODIFY) < 0)
 			return -1;
-		if(tup_db_select_env_commands(mod_cb, &modified, 0) < 0)
+		if(tup_db_select_config_commands(mod_cb, &modified, 0) < 0)
 			return -1;
 		if(tup_db_commit() < 0)
 			return -1;

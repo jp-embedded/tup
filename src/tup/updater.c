@@ -1645,7 +1645,7 @@ static int process_update_nodes(int argc, char **argv, int *num_pruned)
 		return -1;
 	if(tup_db_select_node_by_flags(build_graph_non_transient_cb, &g, TUP_FLAGS_MODIFY) < 0)
 		return -1;
-	if(tup_db_select_env_commands(build_graph_environment_cb, &g, 1) < 0)
+	if(tup_db_select_config_commands(build_graph_configuration_cb, &g, 1) < 0)
 		return -1;
 
 	/* Commands in the transient list have to be processed, and we have to
@@ -1767,7 +1767,7 @@ static int check_update_todo(int argc, char **argv)
 		return -1;
 	if(tup_db_select_node_by_flags(build_graph_cb, &g, TUP_FLAGS_MODIFY) < 0)
 		return -1;
-	if(tup_db_select_env_commands(build_graph_environment_cb, &g, 0) < 0)
+	if(tup_db_select_config_commands(build_graph_configuration_cb, &g, 0) < 0)
 		return -1;
 	if(build_graph(&g) < 0)
 		return -1;
@@ -2143,10 +2143,17 @@ static int update_work(struct graph *g, struct node *n)
 	if(n->tent->type == TUP_NODE_CMD) {
 		if(!n->skip) {
 			/* Once execution starts it may destroy outputs, so a failure
-			 * must remain dirty even if the environment later reverts.
+			 * must remain dirty even if the configuration later reverts.
 			 */
 			pthread_mutex_lock(&db_mutex);
 			rc = tup_db_add_modify_list(n->tnode.tupid);
+			/* Missing transient outputs already leave ordinary modify
+			 * entries. Keep an attempted transient command forced as well,
+			 * so failure cannot be mistaken for an unused missing output
+			 * when its configuration is subsequently restored.
+			 */
+			if(rc == 0 && is_transient_tent(n->tent))
+				rc = tup_db_add_transient_list(n->tnode.tupid);
 			pthread_mutex_unlock(&db_mutex);
 			if(rc < 0)
 				return -1;
@@ -2179,7 +2186,7 @@ static int update_work(struct graph *g, struct node *n)
 		 */
 		if(rc == 0) {
 			pthread_mutex_lock(&db_mutex);
-			if(!n->skip && tup_db_save_environ(n->tnode.tupid) < 0) {
+			if(!n->skip && tup_db_save_config(n->tnode.tupid) < 0) {
 				pthread_mutex_unlock(&db_mutex);
 				return -1;
 			}
