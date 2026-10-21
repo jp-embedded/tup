@@ -52,7 +52,7 @@ if tup flags_exists 2> .tup/pending-flags; then
 	echo 'Expected pending environment work' >&2
 	exit 1
 fi
-grep environment_list .tup/pending-flags
+grep configuration_list .tup/pending-flags
 tup graph > .tup/pending-graph
 grep 'run.sh' .tup/pending-graph
 update_partial compile

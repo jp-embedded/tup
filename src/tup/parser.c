@@ -3610,10 +3610,12 @@ static int do_rule(struct tupfile *tf, struct rule *r, struct name_list *nl,
 			if(tup_db_set_name(cmdtent->tnode.tupid, cmd, tf->tent->tnode.tupid) < 0)
 				return -1;
 
-			/* Since we changed the name, we have to run the
-			 * command again.
+			/* Compare with the last successful execution rather than
+			 * permanently dirtying a command that may be restored before
+			 * a partial update ever executes it.
 			 */
-			command_modified = 1;
+			if(tup_db_config_changed(cmdtent->tnode.tupid) < 0)
+				return -1;
 
 			compare_display_flags = 1;
 		}

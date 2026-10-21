@@ -50,7 +50,7 @@
 #include <sys/stat.h>
 #include "sqlite3/sqlite3.h"
 
-#define DB_VERSION 20
+#define DB_VERSION 21
 #define PARSER_VERSION 16
 
 enum {
@@ -142,10 +142,11 @@ enum {
 	DB_ENV_PENDING_INSERT,
 	DB_ENV_PENDING_UPDATE,
 	DB_ENV_ORPHAN,
-	DB_ENV_HASH,
-	DB_ENV_SAVE,
-	DB_ENV_PENDING_SELECT,
-	DB_ENV_PENDING_CLEAR,
+	DB_CONFIG_PENDING,
+	DB_CONFIG_HASH,
+	DB_CONFIG_SAVE,
+	DB_CONFIG_PENDING_SELECT,
+	DB_CONFIG_PENDING_CLEAR,
 	DB_NUM_STATEMENTS
 };
 
@@ -333,9 +334,9 @@ int tup_db_create(int db_sync, int memory_db)
 		"create table modify_list (id integer primary key not null)",
 		"create table variant_list (id integer primary key not null)",
 		"create table transient_list (id integer primary key not null)",
-		"create table command_env (id integer primary key not null, hash blob, pending integer not null default 0)",
-		"create index command_env_pending on command_env(pending) where pending=1",
-		"create trigger delete_command_env after delete on node begin delete from command_env where id=old.id; end",
+		"create table command_config (id integer primary key not null, hash blob, pending integer not null default 0)",
+		"create index command_config_pending on command_config(pending) where pending=1",
+		"create trigger delete_command_config after delete on node begin delete from command_config where id=old.id; end",
 		"create index normal_index2 on normal_link(to_id)",
 		"create index sticky_index2 on sticky_link(to_id)",
 		"create index group_index2 on group_link(cmdid)",
@@ -691,6 +692,18 @@ static int version_check(void)
 				"insert into command_env(id, pending) select distinct l.to_id, 1 from sticky_link l join node e on e.id=l.from_id join node c on c.id=l.to_id where e.dir=(select id from node where dir=1 and name='$') and c.type=1",
 			}
 		},
+		{
+			/* Upgrade to version 21 */
+			"Track each command's last successful command text and exported environment. Commands will be rebuilt once.",
+			{
+				"drop trigger delete_command_env",
+				"drop table command_env",
+				"create table command_config (id integer primary key not null, hash blob, pending integer not null default 0)",
+				"create index command_config_pending on command_config(pending) where pending=1",
+				"create trigger delete_command_config after delete on node begin delete from command_config where id=old.id; end",
+				"insert into command_config(id, pending) select id, 1 from node where type=1",
+			}
+		},
 	};
 
 	if(tup_db_config_get_int("db_version", -1, &version) < 0)
@@ -886,7 +899,7 @@ static int check_flags_cb(void *arg, int argc, char **argv, char **col)
 	return 0;
 }
 
-static int check_environment_flags_cb(void *arg, struct tup_entry *tent)
+static int check_config_flags_cb(void *arg, struct tup_entry *tent)
 {
 	if(check_flags_name) {
 		fprintf(stderr, "*** %s_list:\n", check_flags_name);
@@ -953,8 +966,8 @@ int tup_db_check_flags(int flags)
 		transaction_started = 0;
 	}
 	if(flags & TUP_FLAGS_MODIFY) {
-		check_flags_name = "environment";
-		if(tup_db_select_env_commands(check_environment_flags_cb, &rc, 0) < 0)
+		check_flags_name = "configuration";
+		if(tup_db_select_config_commands(check_config_flags_cb, &rc, 0) < 0)
 			return -1;
 	}
 	if(tup_db_commit() < 0)
@@ -5141,7 +5154,7 @@ static struct var_entry *envdb_set(const char *var, int varlen, const char *newe
 	return ve;
 }
 
-static int env_statement(int id, const char *sql, tupid_t tupid)
+static int config_statement(int id, const char *sql, tupid_t tupid)
 {
 	sqlite3_stmt **stmt = &stmts[id];
 	int rc;
@@ -5165,29 +5178,43 @@ int tup_db_env_changed(tupid_t tupid)
 	 * by a partial update may already have succeeded with the next invocation's
 	 * environment, even though another invocation observed different values.
 	 */
-	if(env_statement(DB_ENV_PENDING_INSERT,
-		"insert or ignore into command_env(id, pending) select l.to_id, 1 from normal_link l join node n on n.id=l.to_id where l.from_id=? and n.type=1", tupid) < 0)
+	if(config_statement(DB_ENV_PENDING_INSERT,
+		"insert or ignore into command_config(id, pending) select l.to_id, 1 from normal_link l join node n on n.id=l.to_id where l.from_id=? and n.type=1", tupid) < 0)
 		return -1;
-	if(env_statement(DB_ENV_PENDING_UPDATE,
-		"update command_env set pending=1 where id in (select to_id from normal_link where from_id=?)", tupid) < 0)
+	if(config_statement(DB_ENV_PENDING_UPDATE,
+		"update command_config set pending=1 where id in (select to_id from normal_link where from_id=?)", tupid) < 0)
 		return -1;
 	/* Retain lazy cleanup of variables that have no remaining users. */
-	return env_statement(DB_ENV_ORPHAN,
+	return config_statement(DB_ENV_ORPHAN,
 		"insert or ignore into modify_list select ?1 where not exists (select 1 from normal_link where from_id=?1)", tupid);
 }
 
-static int command_env_hash(tupid_t cmdid, unsigned char hash[32])
+int tup_db_config_changed(tupid_t cmdid)
 {
-	sqlite3_stmt **stmt = &stmts[DB_ENV_HASH];
+	return config_statement(DB_CONFIG_PENDING,
+		"insert into command_config(id, pending) values(?, 1) on conflict(id) do update set pending=1", cmdid);
+}
+
+static int command_config_hash(tupid_t cmdid, unsigned char hash[32])
+{
+	sqlite3_stmt **stmt = &stmts[DB_CONFIG_HASH];
 	const char *sql = "select n.name, v.value from sticky_link l join node n on n.id=l.from_id left join var v on v.id=n.id where l.to_id=? and n.dir=? order by n.name";
 	struct tup_sha256 ctx;
+	struct tup_entry *tent;
 	int rc;
+	if(tup_entry_add(cmdid, &tent) < 0)
+		return -1;
 	if(!*stmt && sqlite3_prepare_v2(tup_db, sql, -1, stmt, NULL) != SQLITE_OK)
 		goto error;
 	if(sqlite3_bind_int64(*stmt, 1, cmdid) != SQLITE_OK ||
 	   sqlite3_bind_int64(*stmt, 2, env_dt()) != SQLITE_OK)
 		goto error;
 	tup_sha256_init(&ctx);
+	/* Command text and the exported environment describe the configuration
+	 * that produced the outputs. Flags and dependency/output changes keep
+	 * their ordinary modify-list semantics and are not cancelled here.
+	 */
+	tup_sha256_update(&ctx, tent->name.s, tent->name.len + 1);
 	while((rc = sqlite3_step(*stmt)) == SQLITE_ROW) {
 		const char *name = (const char *)sqlite3_column_text(*stmt, 0);
 		const char *value = (const char *)sqlite3_column_text(*stmt, 1);
@@ -5210,13 +5237,13 @@ error:
 	return -1;
 }
 
-int tup_db_save_environ(tupid_t cmdid)
+int tup_db_save_config(tupid_t cmdid)
 {
-	sqlite3_stmt **stmt = &stmts[DB_ENV_SAVE];
-	const char *sql = "insert or replace into command_env(id, hash, pending) values(?, ?, 0)";
+	sqlite3_stmt **stmt = &stmts[DB_CONFIG_SAVE];
+	const char *sql = "insert or replace into command_config(id, hash, pending) values(?, ?, 0)";
 	unsigned char hash[32];
 	int rc;
-	if(command_env_hash(cmdid, hash) < 0)
+	if(command_config_hash(cmdid, hash) < 0)
 		return -1;
 	transaction_check("%s [%lli]", sql, cmdid);
 	if(!*stmt && sqlite3_prepare_v2(tup_db, sql, -1, stmt, NULL) != SQLITE_OK)
@@ -5233,10 +5260,10 @@ error:
 	return -1;
 }
 
-int tup_db_select_env_commands(int (*callback)(void *, struct tup_entry *), void *arg, int clear_matches)
+int tup_db_select_config_commands(int (*callback)(void *, struct tup_entry *), void *arg, int clear_matches)
 {
-	sqlite3_stmt **stmt = &stmts[DB_ENV_PENDING_SELECT];
-	const char *sql = "select id, hash from command_env where pending=1";
+	sqlite3_stmt **stmt = &stmts[DB_CONFIG_PENDING_SELECT];
+	const char *sql = "select id, hash from command_config where pending=1";
 	struct tupid_entries clear_root = RB_INITIALIZER(&clear_root);
 	struct tupid_tree *tt;
 	int rc;
@@ -5246,7 +5273,7 @@ int tup_db_select_env_commands(int (*callback)(void *, struct tup_entry *), void
 		tupid_t cmdid = sqlite3_column_int64(*stmt, 0);
 		unsigned char hash[32];
 		struct tup_entry *tent;
-		if(command_env_hash(cmdid, hash) < 0)
+		if(command_config_hash(cmdid, hash) < 0)
 			goto error;
 		if(sqlite3_column_bytes(*stmt, 1) == sizeof(hash) &&
 		   memcmp(hash, sqlite3_column_blob(*stmt, 1), sizeof(hash)) == 0) {
@@ -5264,8 +5291,8 @@ int tup_db_select_env_commands(int (*callback)(void *, struct tup_entry *), void
 		tupid_t cmdid = tt->tupid;
 		tupid_tree_rm(&clear_root, tt);
 		free(tt);
-		if(env_statement(DB_ENV_PENDING_CLEAR,
-			"update command_env set pending=0 where id=?", cmdid) < 0) {
+		if(config_statement(DB_CONFIG_PENDING_CLEAR,
+			"update command_config set pending=0 where id=?", cmdid) < 0) {
 			free_tupid_tree(&clear_root);
 			return -1;
 		}
@@ -6601,7 +6628,7 @@ int tup_db_write_outputs(FILE *f, struct tup_entry *cmdtent,
 		/* Commands with transient outputs are almost always in the
 		 * modify list, since their outputs are generally missing,
 		 * which causes the command to go in modify. However, when the
-		 * command is changed, we definitely need to re-run it, so we
+		 * outputs or flags change, we definitely need to re-run it, so we
 		 * also put it in the transient list to guarantee that it gets
 		 * executed.
 		 */
