@@ -1645,6 +1645,8 @@ static int process_update_nodes(int argc, char **argv, int *num_pruned)
 		return -1;
 	if(tup_db_select_node_by_flags(build_graph_non_transient_cb, &g, TUP_FLAGS_MODIFY) < 0)
 		return -1;
+	if(tup_db_select_config_commands(build_graph_configuration_cb, &g, 1) < 0)
+		return -1;
 
 	/* Commands in the transient list have to be processed, and we have to
 	 * add any files in the transient list to the DAG to make sure they can
@@ -1764,6 +1766,8 @@ static int check_update_todo(int argc, char **argv)
 	if(create_graph(&g, TUP_NODE_CMD) < 0)
 		return -1;
 	if(tup_db_select_node_by_flags(build_graph_cb, &g, TUP_FLAGS_MODIFY) < 0)
+		return -1;
+	if(tup_db_select_config_commands(build_graph_configuration_cb, &g, 0) < 0)
 		return -1;
 	if(build_graph(&g) < 0)
 		return -1;
@@ -2111,10 +2115,27 @@ static int create_work(struct graph *g, struct node *n)
 	return rc;
 }
 
+static int modify_command_cb(void *arg, struct tup_entry *tent)
+{
+	(void)arg;
+	if(tent->type == TUP_NODE_CMD)
+		return tup_db_add_modify_list(tent->tnode.tupid);
+	return 0;
+}
+
 static int modify_outputs(struct node *n)
 {
 	struct edge *e;
 	int rc = 0;
+
+	/* A configuration-only partial update may have pruned consumers without
+	 * marking them modified. Once an output actually changes, persist all of
+	 * its normal command dependencies, including those outside this graph.
+	 * Transient cleanup is not an input change: its consumers already ran.
+	 */
+	if(n->configuration_only && n->transient != TRANSIENT_DELETE &&
+	   tup_db_select_node_by_link(modify_command_cb, NULL, n->tnode.tupid) < 0)
+		return -1;
 
 	LIST_FOREACH(e, &n->edges, list) {
 		if(e->style & TUP_LINK_NORMAL) {
@@ -2138,6 +2159,21 @@ static int update_work(struct graph *g, struct node *n)
 
 	if(n->tent->type == TUP_NODE_CMD) {
 		if(!n->skip) {
+			/* Once execution starts it may destroy outputs, so a failure
+			 * must remain dirty even if the configuration later reverts.
+			 */
+			pthread_mutex_lock(&db_mutex);
+			rc = tup_db_add_modify_list(n->tnode.tupid);
+			/* Missing transient outputs already leave ordinary modify
+			 * entries. Keep an attempted transient command forced as well,
+			 * so failure cannot be mistaken for an unused missing output
+			 * when its configuration is subsequently restored.
+			 */
+			if(rc == 0 && is_transient_tent(n->tent))
+				rc = tup_db_add_transient_list(n->tnode.tupid);
+			pthread_mutex_unlock(&db_mutex);
+			if(rc < 0)
+				return -1;
 			pthread_mutex_lock(&display_mutex);
 			jobs_active++;
 			show_progress(jobs_active, TUP_NODE_CMD);
@@ -2167,6 +2203,10 @@ static int update_work(struct graph *g, struct node *n)
 		 */
 		if(rc == 0) {
 			pthread_mutex_lock(&db_mutex);
+			if(!n->skip && tup_db_save_config(n->tnode.tupid) < 0) {
+				pthread_mutex_unlock(&db_mutex);
+				return -1;
+			}
 			LIST_FOREACH(e, &n->edges, list) {
 				if(!e->dest->skip) {
 					if(modify_outputs(e->dest) < 0)

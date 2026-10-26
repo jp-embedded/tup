@@ -624,6 +624,8 @@ static int graph(int argc, char **argv)
 			return -1;
 		if(tup_db_select_node_by_flags(graph_cb, &g, TUP_FLAGS_MODIFY) < 0)
 			return -1;
+		if(tup_db_select_config_commands(graph_cb, &g, 0) < 0)
+			return -1;
 	}
 
 	while(!TAILQ_EMPTY(&g.plist)) {

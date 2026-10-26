@@ -407,6 +407,8 @@ This will add the foo.h dependency to the gcc commands for foo.c and bar.c, so t
 .TP
 .B command
 The command string that will be passed to the system(3) call by tup. This command is allowed to read from any file specified as an input or order-only input, as well as any other file in the tup hierarchy that is not the output of another command. In other words, a command cannot read from another command's output unless it is specified as an input. This restriction is what allows tup to be parallel safe. Additionally, the command must write to all of the output files specified by the "outputs" section, if any.
+
+Tup records the command text and exported environment of each command's last successful execution. If command text is edited and parsed during a partial update that does not execute it, restoring the successful text and environment can avoid rebuilding. This applies when the existing command node is retained, normally by matching the same outputs. Independent input/output changes, flag changes, and failed executions retain their existing rebuild behavior. See the export directive for more details.
 .IP
 When executed, the command's file accesses are monitored by tup to ensure that they conform to these rules. Any files opened for reading that were generated from another command but not specified as inputs are reported as errors. Similarly, any files opened for writing that are not specified as outputs are reported as errors. All files opened for reading are recorded as dependencies to the command. If any of these files change, tup will re-execute the command during the next update. Note that if an input listed in the Tupfile changes, it does not necessarily cause the command to re-execute, unless the command actually read from that input during the prior execution. Inputs listed in the Tupfile only enforce ordering among the commands, while file accesses during execution determine when commands are re-executed.
 .IP
@@ -767,7 +769,7 @@ run ./build.sh *.c src/*.c
 
 .TP
 .B export VARIABLE
-The export directive adds the environment variable VARIABLE to the export list for future :-rules and run-scripts. The value for the variable comes from tup's environment, not from the Tupfile itself. Generally this means you will need to set the variable in your shell if you want to change the value used by commands and scripts. By default only PATH is exported. Windows additionally exports several variables suitable for building with the Visual Studio compiler suite. Tup will check the exported environment variables to see if they have changed values between updates, and re-execute any commands that that use those environment variables. Note that this means if PATH is changed, all commands will run again. For example:
+The export directive adds the environment variable VARIABLE to the export list for future :-rules and run-scripts. The value for the variable comes from tup's environment, not from the Tupfile itself. Generally this means you will need to set the variable in your shell if you want to change the value used by commands and scripts. By default only PATH is exported. Windows additionally exports several variables suitable for building with the Visual Studio compiler suite. Tup compares each command's command text and exported environment with those of its last successful execution, and re-executes the command when they differ. Note that this means if PATH is changed, all selected commands will run again. For example:
 .nf
 
 : |> command1 ... |>
@@ -786,6 +788,8 @@ export FOO
 
 .fi
 when run as "$ FOO=silly tup" would result in the contents of the foo.txt file being "myFOO= envFOO=silly". If the "export FOO" was removed from the Tupfile, the contents of the file would be "myFOO= envFOO=" because tup does not propagate environment variables unless they are explicitly exported. This helps preserve repeatable and deterministic builds.
+
+An unrelated partial update does not replace the successful configuration of commands it does not execute. For example, after "FOO=silly tup foo.txt", running "tup unrelated-target" without FOO and then "FOO=silly tup foo.txt" does not rebuild foo.txt solely because the intervening update observed a different environment. Similarly, editing a command, parsing it during an unrelated partial update, and restoring the original command before it executes does not by itself require rebuilding. The successful configuration belongs to the command node; if parsing replaces that node with a new command, the new command has no successful configuration and must execute. Command flags and changes to dependencies or outputs retain their existing rebuild behavior and are not cancelled by this comparison. Independent file changes and missing outputs still require rebuilding. Failed executions remain pending even if their command text and environment subsequently return to the last successful values. Unset variables are distinct from variables set to an empty string. These per-command comparisons apply to execution rules; environment dependencies used while parsing Tupfiles or running parse-time scripts still trigger parsing when their values change.
 
 If you wish to export a variable to a specific value rather than get the value from the environment, you can do that in your shell instead of through tup. For example, in Linux you can do:
 
