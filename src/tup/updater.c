@@ -2115,10 +2115,27 @@ static int create_work(struct graph *g, struct node *n)
 	return rc;
 }
 
+static int modify_command_cb(void *arg, struct tup_entry *tent)
+{
+	(void)arg;
+	if(tent->type == TUP_NODE_CMD)
+		return tup_db_add_modify_list(tent->tnode.tupid);
+	return 0;
+}
+
 static int modify_outputs(struct node *n)
 {
 	struct edge *e;
 	int rc = 0;
+
+	/* A configuration-only partial update may have pruned consumers without
+	 * marking them modified. Once an output actually changes, persist all of
+	 * its normal command dependencies, including those outside this graph.
+	 * Transient cleanup is not an input change: its consumers already ran.
+	 */
+	if(n->configuration_only && n->transient != TRANSIENT_DELETE &&
+	   tup_db_select_node_by_link(modify_command_cb, NULL, n->tnode.tupid) < 0)
+		return -1;
 
 	LIST_FOREACH(e, &n->edges, list) {
 		if(e->style & TUP_LINK_NORMAL) {
